@@ -21,6 +21,13 @@ if(NOT UNIX OR APPLE)
 endif()
 
 set(OURO_WARNINGS -Wall -Wextra -Werror -Wformat=2 -Wno-unused-parameter)
+# GCC 15.2's IPA bit-CP pass can prove a live int parameter constant zero
+# (observed in a consumer built -Os -flto: a count > 0 arrived as 0). The ring's
+# own build turns the pass off for GCC so no consumer has to know to; clang has
+# no such pass.
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    add_compile_options(-fno-ipa-bit-cp)
+endif()
 find_package(Threads REQUIRED)
 
 set(OURO_CLIENT_SOURCES
