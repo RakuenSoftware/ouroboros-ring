@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Every implementation is held to the same contract: the vectors, the single
+# C host, and cross-language conformance against that host.
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Vectors match their generators
+        run: python3 vectors/check_vectors_current.py -v
+      - name: One host; Go and Rust are clients only
+        run: scripts/check_single_host.sh
+
+  c:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - name: release
+            flags: "-O2"
+            ldflags: ""
+            cmake: ""
+            ctest: ""
+          - name: asan-ubsan
+            flags: "-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined"
+            ldflags: "-fsanitize=address,undefined"
+            cmake: ""
+            ctest: ""
+          - name: tsan-arena
+            flags: "-O1 -g"
+            ldflags: ""
+            cmake: "-DOURO_TSAN=ON"
+            ctest: "-R arena_tsan"
+    name: c (${{ matrix.build.name }})
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Configure
+        run: >
+          cmake -S c -B build -DCMAKE_C_FLAGS="${{ matrix.build.flags }}"
+          -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.build.ldflags }}" ${{ matrix.build.cmake }}
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+        run: ctest --test-dir build --output-on-failure ${{ matrix.build.ctest }}
+      - name: Install
+        if: matrix.build.name == 'release'
+        run: cmake --install build --prefix "$RUNNER_TEMP/prefix" && ls -R "$RUNNER_TEMP/prefix"
+      - name: Build the external module example against the installed package
+        if: matrix.build.name == 'release'
+        run: |
+          cmake -S examples/c-module -B build-example -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix"
+          cmake --build build-example
+
+  go:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+      - name: Format
+        working-directory: go
+        run: test -z "$(gofmt -l ring)"
+      - name: Vet and test without cgo
+        working-directory: go
+        env:
+          CGO_ENABLED: "0"
+        run: go vet ./... && go test -count=1 ./...
+      - name: Race detector
+        working-directory: go
+        run: go test -race -count=1 ./...
+      - name: No cgo boundary
+        run: scripts/check_go_no_cgo.sh
+      - name: Build the C conformance host
+        run: cmake -S c -B build -DBUILD_TESTING=ON && cmake --build build --target ouroboros-ring-conformance-host
+      - name: Go client against the C host
+        working-directory: go
+        env:
+          CGO_ENABLED: "0"
+          OURO_CONFORMANCE_HOST: ${{ github.workspace }}/build/ouroboros-ring-conformance-host
+        run: go test -count=1 -run Conformance -v ./ring
+      - name: C module caller against the Go module process
+        run: |
+          cmake --build build --target ouroboros-ring-module-runtime-harness
+          (cd go && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/go-module-helper" ./ring/testdata/module_helper)
+          timeout 60s build/ouroboros-ring-module-runtime-harness "$RUNNER_TEMP/go-module-helper"
+
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # Pinned in rust/rust-toolchain.toml so coverage cannot change with a
+      # runner image bump.
+      - name: Install the pinned Rust toolchain
+        working-directory: rust
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy
+          cargo --version
+      - name: Format, lint and test
+        working-directory: rust
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - name: Build the C conformance host
+        run: cmake -S c -B build -DBUILD_TESTING=ON && cmake --build build --target ouroboros-ring-conformance-host
+      - name: Rust client against the C host
+        working-directory: rust
+        env:
+          OURO_CONFORMANCE_HOST: ${{ github.workspace }}/build/ouroboros-ring-conformance-host
+        run: timeout 120s cargo test --locked --test c_host_conformance -- --ignored --test-threads=1
+      - name: C module caller against the Rust module process, and the Rust caller against C
+        run: |
+          cmake --build build --target ouroboros-ring-module-runtime-harness
+          (cd rust && cargo build --locked --release \
+             --bin ouroboros-ring-module-helper --bin ouroboros-ring-module-caller-check)
+          timeout 60s build/ouroboros-ring-module-runtime-harness rust/target/release/ouroboros-ring-module-helper
+          OURO_TEST_MODULE_CALLER=rust/target/release/ouroboros-ring-module-caller-check \
+             timeout 90s build/ouroboros-ring-module-runtime-harness
