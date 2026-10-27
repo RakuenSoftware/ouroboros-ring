@@ -1,0 +1,43 @@
+name: Attribution
+
+# No assistant attribution may enter this repository: no co-author trailers,
+# "Generated with" footers, assistant session links or assistant identities, in
+# any commit or in a pull request's title or body. Every event is checked; none
+# is skipped and nothing is exempt.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Full base commit SHA to compare
+        required: true
+        type: string
+      head_sha:
+        description: Full incoming commit SHA to verify
+        required: true
+        type: string
+
+concurrency:
+  group: attribution-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  no-coauthor-trailers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prove the attribution patterns still refuse what they must
+        run: python3 -I scripts/check_no_attribution.py --self-test
+      - name: Refuse attribution in incoming commits and the pull request
+        run: python3 -I scripts/check_no_attribution.py
