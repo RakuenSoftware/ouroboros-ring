@@ -1,0 +1,74 @@
+name: Attribution
+
+# No assistant attribution may enter this repository: no co-author trailers,
+# "Generated with" footers, assistant session links or assistant identities, in
+# any commit, pull request title or body, or their edit history. Every event is
+# checked; none is skipped and nothing is exempt.
+#
+# The policy is aimee's, run from aimee itself (scripts/check-pr-attribution.go
+# over server-go/modules/git/attribution) at a pinned commit, so this repository,
+# aimee's own gate and aimee's merge executor enforce one implementation.
+# Re-pin AIMEE_POLICY_COMMIT when that policy changes.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Full base commit SHA to compare
+        required: true
+        type: string
+      head_sha:
+        description: Full incoming commit SHA to verify
+        required: true
+        type: string
+
+concurrency:
+  group: attribution-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  AIMEE_POLICY_COMMIT: e9f4c7ec19ec8f1964979d1ab0b8c39db254435b
+
+jobs:
+  no-coauthor-trailers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: RakuenSoftware/aimee
+          ref: ${{ env.AIMEE_POLICY_COMMIT }}
+          path: aimee-policy
+          persist-credentials: false
+          sparse-checkout: |
+            server-go/go.mod
+            server-go/go.sum
+            server-go/modules/git/attribution
+            scripts/check-pr-attribution.go
+            scripts/check-pr-attribution_test.go
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: aimee-policy/server-go/go.mod
+          cache: false
+      - name: Test the attribution policy
+        working-directory: aimee-policy/server-go
+        run: |
+          go test ./modules/git/attribution
+          go test ../scripts/check-pr-attribution.go ../scripts/check-pr-attribution_test.go
+      - name: Enforce attribution across incoming commits and PR history
+        working-directory: aimee-policy/server-go
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: go run ../scripts/check-pr-attribution.go
