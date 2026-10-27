@@ -72,8 +72,7 @@ var (
 // match; a version refusal means the two ends disagree about the protocol;
 // no-slot means the host is full and it is worth retrying. A bare "attach
 // denied" for all of them sends a reader to the grant file even when the grant
-// was never the problem, which aimee's src/tests/test_plugin_grant_provisioning.c names
-// as the reason that test exists.
+// was never the problem.
 func (s AttachStatus) String() string {
 	switch s {
 	case AttachOK:

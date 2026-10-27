@@ -2,9 +2,11 @@
 
 A local shared-memory message ring between separate programs on one host. One
 **host** owns the memory, admits clients and routes typed events; each admitted
-**client** maps only its own queue pair and a shared payload arena. It is the
-internal ring of [aimee](https://github.com/RakuenSoftware/aimee), and it is a
-contract first: anyone may implement it in any language.
+**client** maps only its own queue pair and a shared payload arena. It is a
+contract first: anyone may implement it in any language. It stands on its own:
+nothing here builds, tests or runs against another project.
+[aimee](https://github.com/RakuenSoftware/aimee), where it began, is one consumer
+and pins a release of it like any other.
 
 - **The contract** is [`spec/`](spec/README.md) plus the frozen numbers in
   [`vectors/`](vectors/). It states what every implementation must do, with
