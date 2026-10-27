@@ -29,7 +29,11 @@ about the contract rather than one codebase agreeing with itself.
 
 ## Versions
 
-`VERSION` is the release of this repository. The contract carries its own
+`VERSION` is the release of this repository, in semver: within 0.x a minor bump
+may break consumers, from 1.0 only a major bump may. A change to `VERSION` on
+`main` is tested and tagged `v<VERSION>` (and `go/v<VERSION>` for the Go module)
+by `.github/workflows/release.yml`; a tag is never moved. Consumers name a
+release or a compatible range, never a commit. The contract carries its own
 versions, frozen in `vectors/layout_vectors.tsv`: `version.spec`,
 `version.layout`, `version.wire` and `version.amod`. A host and client negotiate
 the wire version at attach.
@@ -63,9 +67,9 @@ Unix socket paths are limited to 108 bytes; run the tests with a short `TMPDIR`.
   as CMake packages (`find_package(ouroboros-ring)`, targets `ouroboros::...`)
   and pkg-config files. Headers are `<ouroboros/*.h>`; every public name is
   prefixed `ouro_` / `OURO_`.
-- **Go:** `go get github.com/RakuenSoftware/ouroboros-ring/go@<commit>`, then
+- **Go:** `go get github.com/RakuenSoftware/ouroboros-ring/go@v<VERSION>`, then
   import `github.com/RakuenSoftware/ouroboros-ring/go/ring`.
-- **Rust:** `ouroboros-ring = { git = "https://github.com/RakuenSoftware/ouroboros-ring", rev = "<commit>" }`
+- **Rust:** `ouroboros-ring = { git = "https://github.com/RakuenSoftware/ouroboros-ring", tag = "v<VERSION>" }`
   (crate path `rust/`).
 
 ## License

@@ -1,0 +1,62 @@
+name: Release
+
+# A release is VERSION on main. When VERSION changes (or this workflow does),
+# main is tested and tagged v<VERSION>, with go/v<VERSION> for the Go module in
+# go/. Consumers name a release, never a commit; the contract in spec/ and
+# vectors/ is what a release promises. VERSION follows semver: within 0.x a
+# minor bump may break, from 1.0 only a major bump may.
+#
+# A tag that already exists is never moved: a release is immutable once cut.
+on:
+  push:
+    branches: [main]
+    paths: [VERSION, .github/workflows/release.yml]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Read VERSION
+        id: version
+        run: |
+          v=$(head -n1 VERSION)
+          [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION '$v' is not semver"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Vectors match their generators
+        run: python3 vectors/check_vectors_current.py -v
+      - name: Build and test the C implementation
+        run: |
+          cmake -S c -B build -DCMAKE_C_FLAGS=-O2
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+      - name: Tag the release
+        env:
+          V: ${{ steps.version.outputs.version }}
+        run: |
+          for tag in "v$V" "go/v$V"; do
+            if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+              if [ "$(git rev-list -n1 "$tag")" != "$GITHUB_SHA" ]; then
+                echo "$tag already exists at $(git rev-list -n1 "$tag"); bump VERSION for a new release"
+              else
+                echo "$tag already at $GITHUB_SHA"
+              fi
+              continue
+            fi
+            git tag "$tag" "$GITHUB_SHA"
+            git push origin "refs/tags/$tag"
+            echo "tagged $tag at $GITHUB_SHA"
+          done
