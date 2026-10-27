@@ -1,4 +1,4 @@
-//! Rust reference client for the Aimee ouroboros ring, and a
+//! Rust reference client for the ouroboros ring, and a
 //! module-process runtime on top of it.
 //!
 //! This is the third independent client of the single in-source C host,
