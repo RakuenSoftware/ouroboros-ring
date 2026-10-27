@@ -1,0 +1,30 @@
+[package]
+name = "ouroboros-ring"
+version = "0.1.0"
+description = "Rust reference client and module-process runtime for the ouroboros ring"
+edition = "2024"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/RakuenSoftware/ouroboros-ring"
+publish = false
+
+# Deliberately one dependency. The client must not link, import, or generate
+# from the C or Go reference implementations: scripts/check_single_host.sh
+# rejects a build script or any further dependency.
+[dependencies]
+libc = "0.2"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+[[bin]]
+name = "ouroboros-ring-module-helper"
+path = "src/bin/ouroboros-ring-module-helper.rs"
+
+[[bin]]
+name = "ouroboros-ring-module-caller-check"
+path = "src/bin/ouroboros-ring-module-caller-check.rs"

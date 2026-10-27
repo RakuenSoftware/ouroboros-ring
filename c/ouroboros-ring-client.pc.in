@@ -1,0 +1,9 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: ouroboros-ring-client
+Description: Ouroboros ring client for module processes
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -louroboros-ring-client -pthread
+Cflags: -I${includedir}
