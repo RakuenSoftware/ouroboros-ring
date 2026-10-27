@@ -3,13 +3,17 @@
  * The wire version this host speaks. A client declares a [min,max] range at
  * attach and the host picks the highest common value, or denies.
  */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <stddef.h>
 #include <unistd.h>
 
 #include <ouroboros/host.h>
@@ -168,12 +172,32 @@ static ouro_host_result_t deny(int conn_fd, ouro_attach_status_t status)
    return OURO_HOST_ERR_REFUSED;
 }
 
-ouro_host_result_t ouro_host_serve_attach(ouro_host_t *h, int conn_fd)
+/* A held unnamed socketpair is a host capability, not a listener request.
+ * Verify kernel peer identity before admitting the daemon's private class0
+ * client; no external grant callback is disabled or replaced. */
+static int host_owned_socketpair(int fd)
 {
-   return ouro_host_serve_attach_ex(h, conn_fd, NULL);
+#if defined(__linux__) && defined(SO_PEERCRED)
+   struct ucred peer;
+   socklen_t peer_size = sizeof peer;
+   struct sockaddr_un local, remote;
+   socklen_t local_size = sizeof local, remote_size = sizeof remote;
+   int type = 0;
+   socklen_t type_size = sizeof type;
+   return getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &type_size) == 0 && type == SOCK_SEQPACKET &&
+          getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) == 0 &&
+          peer_size == sizeof peer && peer.pid == getpid() && peer.uid == geteuid() &&
+          getsockname(fd, (struct sockaddr *)&local, &local_size) == 0 &&
+          getpeername(fd, (struct sockaddr *)&remote, &remote_size) == 0 &&
+          local.sun_family == AF_UNIX && remote.sun_family == AF_UNIX &&
+          local_size == offsetof(struct sockaddr_un, sun_path) &&
+          remote_size == offsetof(struct sockaddr_un, sun_path);
+#else
+   (void)fd;
+   return 0; /* No guessed identity on platforms without same-process attestation. */
+#endif
 }
-
-ouro_host_result_t ouro_host_serve_attach_ex(ouro_host_t *h, int conn_fd, uint32_t *slot_out)
+static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *slot_out, int owned)
 {
    if (slot_out)
       *slot_out = UINT32_MAX;
@@ -194,9 +218,13 @@ ouro_host_result_t ouro_host_serve_attach_ex(ouro_host_t *h, int conn_fd, uint32
    if (req.wire_version_min > OURO_HOST_WIRE_VERSION || req.wire_version_max < OURO_HOST_WIRE_VERSION)
       return deny(conn_fd, OURO_ATTACH_DENIED_VERSION);
 
-   /* Admission decision — identity/policy only. Default-admit when no seam is
-    * injected (tests). */
-   if (h->admit)
+   if (owned &&
+       (req.principal_class != 0 || req.principal_ref != 0 || !host_owned_socketpair(conn_fd)))
+      return deny(conn_fd, OURO_ATTACH_DENIED_POLICY);
+
+   /* External admission and capability binding are unchanged. A private owned
+    * socketpair is verified above and never enters the external grant policy. */
+   if (!owned && h->admit)
    {
       ouro_attach_status_t d = h->admit(h->admit_ctx, conn_fd, &req);
       if (d != OURO_ATTACH_OK)
@@ -237,7 +265,7 @@ ouro_host_result_t ouro_host_serve_attach_ex(ouro_host_t *h, int conn_fd, uint32
    s->heartbeat_at = 0;
    h->admitted++;
 
-   if (h->attach_hook)
+   if (!owned && h->attach_hook)
    {
       ouro_attach_status_t hook_status = h->attach_hook(h->attach_hook_ctx, h, idx, &req);
       if (hook_status != OURO_ATTACH_OK)
@@ -293,6 +321,19 @@ ouro_host_result_t ouro_host_serve_attach_ex(ouro_host_t *h, int conn_fd, uint32
    if (slot_out)
       *slot_out = idx;
    return OURO_HOST_OK;
+}
+
+ouro_host_result_t ouro_host_serve_attach(ouro_host_t *h, int fd)
+{
+   return serve_attach(h, fd, NULL, 0);
+}
+ouro_host_result_t ouro_host_serve_attach_ex(ouro_host_t *h, int fd, uint32_t *slot)
+{
+   return serve_attach(h, fd, slot, 0);
+}
+ouro_host_result_t ouro_host_serve_attach_owned(ouro_host_t *h, int fd)
+{
+   return serve_attach(h, fd, NULL, 1);
 }
 
 /* ------------------------------------------------------------------ */

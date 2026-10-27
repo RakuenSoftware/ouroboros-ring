@@ -373,6 +373,49 @@ static void test_capability_hook(void)
    printf("  capability hook: grants bind before descriptors; denial rolls back\n");
 }
 
+static ouro_attach_status_t reject_external(void *context, int fd, const ouro_attach_request_t *req)
+{
+   (void)fd;
+   (void)req;
+   ++*(unsigned *)context;
+   return OURO_ATTACH_DENIED_POLICY;
+}
+static void test_owned_attach_keeps_external_policy(void)
+{
+   ouro_host_t host;
+   ouro_host_config_t cfg = default_cfg();
+   unsigned external_calls = 0;
+   must(ouro_host_create(&host, &cfg, reject_external, &external_calls) == OURO_HOST_OK,
+        "owned host");
+   for (int mode = 0; mode < 3; ++mode)
+   {
+      int pair[2];
+      must(!socketpair(AF_UNIX, SOCK_SEQPACKET, 0, pair), "owned pair");
+      ouro_attach_request_t req = {.magic = OURO_ATTACH_REQ_MAGIC,
+                                   .wire_version_min = OURO_WIRE_VERSION,
+                                   .wire_version_max = OURO_WIRE_VERSION,
+                                   .principal_class = mode == 1 ? 1 : 0,
+                                   .principal_ref = mode == 1 ? 76 : 0};
+      must(!ouro_fd_send(pair[0], &req, sizeof req, NULL, 0), "owned request");
+      ouro_host_result_t result = mode == 2 ? ouro_host_serve_attach(&host, pair[1])
+                                            : ouro_host_serve_attach_owned(&host, pair[1]);
+      client_t client;
+      must(result == (mode == 0 ? OURO_HOST_OK : OURO_HOST_ERR_REFUSED), "owned status");
+      must(client_recv(pair[0], &client) ==
+               (mode == 0 ? OURO_ATTACH_OK : OURO_ATTACH_DENIED_POLICY),
+           "owned identity cannot impersonate external principal");
+      if (mode == 0)
+         client_unmap(&client);
+      must(host.admit == reject_external && host.admit_ctx == &external_calls,
+           "external policy retained");
+      close(pair[0]);
+      close(pair[1]);
+   }
+   must(external_calls == 1, "only ordinary attach invokes external policy");
+   ouro_host_destroy(&host);
+}
+
+
 int main(void)
 {
    printf("test_bus_host:\n");
@@ -383,6 +426,7 @@ int main(void)
    test_reaping();
    test_epoch();
    test_capability_hook();
+   test_owned_attach_keeps_external_policy();
    printf("test_bus_host: OK\n");
    return 0;
 }

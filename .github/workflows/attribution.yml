@@ -39,7 +39,7 @@ permissions:
   contents: read
 
 env:
-  AIMEE_POLICY_COMMIT: e9f4c7ec19ec8f1964979d1ab0b8c39db254435b
+  AIMEE_POLICY_COMMIT: 19700e087b02438acbd853cfa14935067c687607
 
 jobs:
   no-coauthor-trailers:
@@ -50,6 +50,7 @@ jobs:
       issues: read
       pull-requests: read
       checks: read
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
