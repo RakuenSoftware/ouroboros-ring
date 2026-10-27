@@ -12,7 +12,12 @@ name: Attribution
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
+  # Only the protected branch: a push that creates a branch has an all-zero
+  # "before", which the policy refuses, and that rejection would stay recorded
+  # on the commit and fail its pull request forever. Work branches are checked
+  # through their pull request instead.
   push:
+    branches: [main]
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
