@@ -56,6 +56,11 @@ jobs:
       - name: Install
         if: matrix.build.name == 'release'
         run: cmake --install build --prefix "$RUNNER_TEMP/prefix" && ls -R "$RUNNER_TEMP/prefix"
+      - name: Build the external module example against the installed package
+        if: matrix.build.name == 'release'
+        run: |
+          cmake -S examples/c-module -B build-example -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix"
+          cmake --build build-example
 
   go:
     runs-on: ubuntu-24.04
