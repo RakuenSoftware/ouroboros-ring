@@ -14,6 +14,10 @@ and pins a release of it like any other.
 - **The reference implementations** below are usable as they are and are held
   to the contract by the same vectors and conformance checks a new
   implementation would be. None links, imports or generates from another.
+- **The documentation** in [`docs/`](docs/README.md) explains how it works:
+  the [architecture](docs/architecture.md), attach and admission, routing and
+  flow control, module calls, arena payloads, capture, conformance, and
+  versions.
 
 ## Implementations
 

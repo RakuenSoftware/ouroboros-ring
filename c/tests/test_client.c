@@ -1,4 +1,4 @@
-/* test_bus_client.c: slice 8 of the ring feature tree.
+/* test_client.c: slice 8 of the ring feature tree.
  *
  * The C reference client, driven against a real host in one process. Once
  * attached, host and client share memory, so the test pumps the host's routing
@@ -665,7 +665,7 @@ static void test_release_backlog(void)
 
 int main(void)
 {
-   printf("test_bus_client:\n");
+   printf("test_client:\n");
    test_wrapped_payload_ref_is_dropped();
    test_retry_never_delivers_to_a_reused_slot();
    test_arena_placed_release_reclaims_only_its_own();
@@ -678,6 +678,6 @@ int main(void)
    test_capability_absent();
    test_would_block();
    test_heartbeat_and_epoch();
-   printf("test_bus_client: OK\n");
+   printf("test_client: OK\n");
    return 0;
 }

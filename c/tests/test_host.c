@@ -1,4 +1,4 @@
-/* test_bus_host.c: slice 5 of the ring feature tree.
+/* test_host.c: slice 5 of the ring feature tree.
  *
  * The host is the admission boundary, so the tests check the boundary as an
  * outcome:
@@ -418,7 +418,7 @@ static void test_owned_attach_keeps_external_policy(void)
 
 int main(void)
 {
-   printf("test_bus_host:\n");
+   printf("test_host:\n");
    test_admit_and_traffic();
    test_two_clients_isolated();
    test_denials();
@@ -427,6 +427,6 @@ int main(void)
    test_epoch();
    test_capability_hook();
    test_owned_attach_keeps_external_policy();
-   printf("test_bus_host: OK\n");
+   printf("test_host: OK\n");
    return 0;
 }

@@ -84,6 +84,30 @@ This happens inside `ouro_host_pump`:
 Every arena frame is checked against the authoritative lease (generation, and
 `payload_len` within the span) before routing; a mismatch is dropped and counted.
 
+## A lease's life
+
+Every lease carries a generation and a reference count
+([D3](../spec/decisions.md#d3-arena-leases-host-mediated-with-generations-and-refcounts)).
+The producer holds the first reference; publishing hands it to the consumers;
+the span returns to the free pool only when the count reaches zero.
+
+```mermaid
+stateDiagram-v2
+    [*] --> allocated: ouro_arena_alloc<br/>(refcount 1, the producer's)
+    allocated --> allocated: producer fills the span
+    allocated --> free: ouro_arena_cancel, or the producer is reaped
+    allocated --> published: frame routed to k destinations<br/>(+k consumer refs, -1 producer ref)
+    published --> free: k = 0 (nobody to deliver to)
+    published --> published: a consumer's next poll returns its ref (-1),<br/>or a consumer is reaped (its refs dropped)
+    published --> free: refcount reaches 0
+    free --> [*]: the generation moves on,<br/>so a stale reference reads as invalid
+```
+
+A producer that is reaped after publishing does not take the span with it: the
+consumers' references keep it alive until they are returned. A consumer that is
+reaped has every reference it held dropped, so repeated consumer deaths cannot
+exhaust the arena.
+
 ## Threading
 
 The lease table is guarded by an in-process mutex, so a producer thread may

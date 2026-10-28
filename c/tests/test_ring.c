@@ -1,4 +1,4 @@
-/* test_bus_ring.c: slice 2 of the ring feature tree.
+/* test_ring.c: slice 2 of the ring feature tree.
  *
  * The ring's correctness case is a concurrency argument, so the tests are built
  * to attack it rather than to demonstrate it:
@@ -406,13 +406,13 @@ static void test_consumer_never_passes_producer(void)
 
 int main(void)
 {
-   printf("test_bus_ring:\n");
+   printf("test_ring:\n");
    test_geometry();
    test_attach_validation();
    test_handle_isolates_geometry();
    test_full_empty_and_wrap();
    test_consumer_never_passes_producer();
    test_threaded_stress();
-   printf("test_bus_ring: OK\n");
+   printf("test_ring: OK\n");
    return 0;
 }

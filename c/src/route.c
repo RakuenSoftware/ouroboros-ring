@@ -30,9 +30,9 @@
  * an inline fan-out — a SHED-full observer that will never read has its ref
  * released so the lease still drains. The host never dereferences an arena
  * offset; only a (co-located, trusted) consumer does, gated by the lease table's
- * generation + holder checks. A correlated arena pattern (request/reply/cancel)
- * is not routed yet — its lease is reclaimed so it cannot leak — until the memory
- * round-trip that needs it lands.
+ * generation + holder checks. A correlated arena request or reply routes
+ * point-to-point (to the kind's server, or back to the requester) under the same
+ * publish-once, refcount-correct discipline (D12).
  */
 #include <string.h>
 

@@ -18,8 +18,8 @@ import (
 // inside the harness — on one host is the credibility test for "any language".
 //
 // The harness binary path is passed in OURO_CONFORMANCE_HOST; without it the test
-// skips, so `go test ./ring/...` alone stays hermetic. scripts/test_bus_conformance.sh
-// builds the harness and sets the variable.
+// skips, so `go test ./ring/...` alone stays hermetic. CI builds the harness
+// (the ouroboros-ring-conformance-host CMake target) and sets the variable.
 func TestCrossLanguageConformance(t *testing.T) {
 	harness := os.Getenv("OURO_CONFORMANCE_HOST")
 	if harness == "" {
@@ -332,7 +332,7 @@ func TestCrossLanguageConformance(t *testing.T) {
 }
 
 const (
-	// Kinds must match bus_conformance_host.c.
+	// Kinds must match c/conformance/host.c.
 	KIND_NOTIFY      uint32 = 1000
 	KIND_ACK         uint32 = 1001
 	KIND_ECHO        uint32 = 1002

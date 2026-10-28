@@ -1,4 +1,4 @@
-/* test_bus_arena_tsan.c: the cross-thread arena lease-table race harness.
+/* test_arena_tsan.c: the cross-thread arena lease-table race harness.
  *
  * ouro_arena's lease table is host-private but NOT single-threaded: a co-located
  * producer (D7) allocates and fills leases from its own thread while the host's
@@ -161,7 +161,7 @@ static void *consumer_main(void *arg)
 
 int main(void)
 {
-   printf("test_bus_arena_tsan: %d messages across producer/pump/consumer threads\n", N_MESSAGES);
+   printf("test_arena_tsan: %d messages across producer/pump/consumer threads\n", N_MESSAGES);
 
    ouro_host_config_t cfg;
    memset(&cfg, 0, sizeof cfg);
@@ -198,6 +198,6 @@ int main(void)
    ouro_client_detach(&g_producer);
    ouro_client_detach(&g_consumer);
    ouro_host_destroy(&g_host);
-   printf("test_bus_arena_tsan: OK (%d messages, arena drained, no race)\n", N_MESSAGES);
+   printf("test_arena_tsan: OK (%d messages, arena drained, no race)\n", N_MESSAGES);
    return 0;
 }
