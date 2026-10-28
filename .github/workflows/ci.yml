@@ -53,6 +53,9 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1
         run: ctest --test-dir build --output-on-failure ${{ matrix.build.ctest }}
+      - name: Dispatch overhead is within budget
+        if: matrix.build.name == 'release'
+        run: scripts/check_perf_budget.sh build
       - name: Install
         if: matrix.build.name == 'release'
         run: cmake --install build --prefix "$RUNNER_TEMP/prefix" && ls -R "$RUNNER_TEMP/prefix"

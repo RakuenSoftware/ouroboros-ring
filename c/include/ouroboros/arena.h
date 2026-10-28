@@ -112,7 +112,7 @@ typedef struct
    uint64_t bytes_in_use;
 
    /* The lease table is host-private and small, but it is NOT single-threaded:
-    * co-located producers (D7) allocate and fill from their own threads while the
+    * co-located producers (D3) allocate and fill from their own threads while the
     * host's pump thread publishes, releases, and reaps. This in-process mutex
     * guards every table transition. It never covers a payload-byte copy — a
     * producer fills, and a consumer reads, the leased span OUTSIDE the lock, safe

@@ -44,6 +44,7 @@ set(OURO_HOST_SOURCES
     src/arena.c
     src/capture.c
     src/host.c
+    src/local_attach.c
     src/region_host.c
     src/route.c
     src/runtime.c)
@@ -93,11 +94,11 @@ if(BUILD_TESTING)
     set(OURO_TEST_layout src/region.c src/ring.c src/module_protocol.c)
     set(OURO_TEST_region src/region.c src/region_host.c src/ring.c)
     set(OURO_TEST_arena src/arena.c src/region.c src/ring.c)
-    foreach(name host route client capture runtime module_embedded_runtime)
+    foreach(name host route client capture local_attach runtime module_embedded_runtime)
         set(OURO_TEST_${name} ${OURO_ALL_SOURCES})
     endforeach()
     foreach(name ring wire endpoint module_protocol layout region arena host route client capture
-                 runtime module_embedded_runtime)
+                 local_attach runtime module_embedded_runtime)
         add_executable(test_${name} tests/test_${name}.c ${OURO_TEST_${name}})
         target_compile_features(test_${name} PRIVATE c_std_11)
         target_compile_options(test_${name} PRIVATE ${OURO_WARNINGS})
@@ -128,6 +129,15 @@ if(BUILD_TESTING)
     target_include_directories(ouroboros-ring-module-runtime-harness PRIVATE include src tests)
     target_link_libraries(ouroboros-ring-module-runtime-harness PRIVATE Threads::Threads)
     add_test(NAME module_runtime COMMAND ouroboros-ring-module-runtime-harness)
+
+    # The dispatch-overhead benchmark scripts/check_perf_budget.sh holds to the
+    # ceiling in bench/baseline.json. Always optimized, whatever the build type,
+    # so the number means the same thing in every build that produces it.
+    add_executable(ouroboros-ring-dispatch-bench bench/dispatch.c ${OURO_ALL_SOURCES})
+    target_compile_features(ouroboros-ring-dispatch-bench PRIVATE c_std_11)
+    target_compile_options(ouroboros-ring-dispatch-bench PRIVATE ${OURO_WARNINGS} -O2)
+    target_include_directories(ouroboros-ring-dispatch-bench PRIVATE include src)
+    target_link_libraries(ouroboros-ring-dispatch-bench PRIVATE Threads::Threads)
 
     # The arena's lock discipline under ThreadSanitizer: its own build, because
     # TSan cannot share objects with the address/undefined sanitizer builds.

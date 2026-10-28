@@ -11,17 +11,18 @@
  *     seq gap, a mid-stream CRC failure, a record after epoch_change, or an
  *     unknown format_version are all corrupt.
  */
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include <ouroboros/capture.h>
 #include <ouroboros/client.h>
 #include <ouroboros/host.h>
+#include <ouroboros/local_attach.h>
 #include <ouroboros/wire.h>
+
+#include "support/tmpdir.h"
 
 static void must(int cond, const char *what)
 {
@@ -121,28 +122,9 @@ static void test_materialized_payload(void)
    printf("  materialized payload: recorded and read back byte-exact\n");
 }
 
-struct serve_arg
-{
-   ouro_host_t *h;
-   int fd;
-};
-static void *serve_thread(void *p)
-{
-   struct serve_arg *a = p;
-   ouro_host_serve_attach(a->h, a->fd);
-   return NULL;
-}
 static void attach_client(ouro_host_t *h, ouro_client_t *c)
 {
-   int sv[2];
-   must(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) == 0, "socketpair");
-   struct serve_arg a = {.h = h, .fd = sv[1]};
-   pthread_t t;
-   must(pthread_create(&t, NULL, serve_thread, &a) == 0, "spawn serve");
-   must(ouro_client_attach(sv[0], c) == OURO_CLIENT_OK, "attach");
-   pthread_join(t, NULL);
-   close(sv[0]);
-   close(sv[1]);
+   must(ouro_host_attach_local(h, c, 0) == OURO_CLIENT_OK, "attach");
 }
 
 /* Route real events through the host with the capture tap installed, and confirm
@@ -361,6 +343,92 @@ static void test_arena_captured_and_replayed(void)
    printf("  arena capture: an arena payload is materialized and replayed byte-exact\n");
 }
 
+/* ---- writing to a file ---- */
+
+static size_t read_file(const char *path, uint8_t *buf, size_t cap)
+{
+   FILE *f = fopen(path, "rb");
+   must(f != NULL, "open capture file");
+   size_t n = fread(buf, 1, cap, f);
+   fclose(f);
+   return n;
+}
+
+/* Flushing many times builds one stream: the header once, then every record in
+ * seq order, so the file reads back exactly like the sink would have. */
+static void test_flush_to_file(void)
+{
+   char path[4096];
+   snprintf(path, sizeof path, "%s/ouro-capture-XXXXXX", test_tmpdir());
+   int fd = mkstemp(path);
+   must(fd >= 0, "temp file");
+
+   ouro_capture_t c;
+   ouro_capture_init(&c, 1, 1, 7);
+   uint64_t written = 0;
+   must(ouro_capture_flush_fd(&c, fd, &written, 0) == OURO_CAPTURE_FLUSHED && written == 0,
+        "an empty sink writes nothing");
+   tap_frame(&c, 700, 1, "a");
+   tap_frame(&c, 700, 2, "bb");
+   must(ouro_capture_flush_fd(&c, fd, &written, 0) == OURO_CAPTURE_FLUSHED, "first flush");
+   must(c.len == 0 && c.header_written, "sink emptied, header remembered");
+   uint64_t after_first = written;
+   tap_frame(&c, 701, 3, "ccc");
+   must(ouro_capture_flush_fd(&c, fd, &written, 0) == OURO_CAPTURE_FLUSHED, "second flush");
+   must(written > after_first, "running count advanced");
+   close(fd);
+
+   static uint8_t buf[8192];
+   size_t n = read_file(path, buf, sizeof buf);
+   must(n == written, "file holds exactly what was counted");
+   g_n = 0;
+   ouro_capture_report_t rep = ouro_capture_read(buf, n, collect, NULL);
+   must(rep.status == OURO_CAPTURE_OPEN && rep.records == 3, "one open stream of three records");
+   must(g_seq[0] == 1 && g_seq[1] == 2 && g_seq[2] == 3 && g_kind[2] == 701, "in seq order");
+   unlink(path);
+   ouro_capture_free(&c);
+   printf("  file: repeated flushes write one header and one contiguous stream\n");
+}
+
+/* The limit is checked before writing, so the file never passes it, and the sink
+ * breaks so the tap stops growing a stream nothing will persist. */
+static void test_flush_limit_and_failure(void)
+{
+   char path[4096];
+   snprintf(path, sizeof path, "%s/ouro-capture-XXXXXX", test_tmpdir());
+   int fd = mkstemp(path);
+   must(fd >= 0, "temp file");
+
+   ouro_capture_t c;
+   ouro_capture_init(&c, 1, 1, 7);
+   uint64_t written = 0;
+   tap_frame(&c, 700, 1, "a");
+   uint64_t limit = (uint64_t)c.len + 8;
+   must(ouro_capture_flush_fd(&c, fd, &written, limit) == OURO_CAPTURE_FLUSHED, "fits");
+   tap_frame(&c, 700, 2, "a record that does not fit in eight bytes");
+   must(ouro_capture_flush_fd(&c, fd, &written, limit) == OURO_CAPTURE_FLUSH_LIMIT, "limit");
+   must(written <= limit && c.broken && c.len == 0, "nothing past the limit, sink broken");
+   must(ouro_capture_flush_fd(&c, fd, &written, limit) == OURO_CAPTURE_FLUSH_BROKEN,
+        "a broken sink stays broken");
+   close(fd);
+   static uint8_t buf[4096];
+   size_t n = read_file(path, buf, sizeof buf);
+   must(ouro_capture_read(buf, n, NULL, NULL).status == OURO_CAPTURE_OPEN,
+        "what was written is still a valid stream");
+   unlink(path);
+   ouro_capture_free(&c);
+
+   ouro_capture_init(&c, 1, 1, 7);
+   written = 0;
+   tap_frame(&c, 700, 1, "a");
+   must(ouro_capture_flush_fd(&c, -1, &written, 0) == OURO_CAPTURE_FLUSH_WRITE_FAILED,
+        "a failed write is reported");
+   must(c.broken && c.len == 0 && written == 0, "and breaks the sink");
+   must(strcmp(ouro_capture_flush_name(OURO_CAPTURE_FLUSH_LIMIT), "limit") == 0, "names");
+   ouro_capture_free(&c);
+   printf("  file: the byte limit holds and a failed write breaks the sink\n");
+}
+
 int main(void)
 {
    printf("test_bus_capture:\n");
@@ -369,6 +437,8 @@ int main(void)
    test_end_to_end_host();
    test_arena_captured_and_replayed();
    test_terminal_states();
+   test_flush_to_file();
+   test_flush_limit_and_failure();
    printf("test_bus_capture: OK\n");
    return 0;
 }

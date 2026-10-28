@@ -1,12 +1,11 @@
 # Ring v0: rendered decisions (D1–D12)
 
 - **State:** DECIDED. 2026-07-23, revision 7, after six rounds of roundtable review.
-- **Companion:** [`EVENT_BUS_FEATURE_TREE.md`](EVENT_BUS_FEATURE_TREE.md). Scope, the twelve slices,
-  the dependency graph, and **acceptance ids 1–6**, each of which names the decisions it enforces.
-  This document holds only the decisions; the tree references them by id and is reviewed alongside it.
-- **Implements:** [`ring-wire-spec.md`](../proposals/done/ring-wire-spec.md) v0 DRAFT,
-  under [`core-substrate-and-source-module-boundaries.md`](../proposals/done/core-substrate-and-source-module-boundaries.md)
-  requirements R1 to R6 ([README](README.md#requirements)).
+- **Origin:** written while the ring was built inside
+  [aimee](https://github.com/RakuenSoftware/aimee), which keeps the feature tree, the review rounds
+  and the proposals the decisions cite. Those are history; this document and
+  [`wire-and-segment.md`](wire-and-segment.md) are the contract.
+- **Implements:** requirements R1 to R6 ([README](README.md#requirements)).
 
 Every decision below is rendered, not deferred. Where a decision changes the wire spec, it is marked
 and gated in [D1](#d1--segment-access-multiple-memfds-not-one-named-segment).
@@ -336,48 +335,18 @@ published" and "what arrived" from one capture point.
 
 ---
 
-## D7: The ring does not link into any shipping binary in this tree
+## D7: Where the ring links is the consumer's decision
 
-**Decision: build as a static library with its own test-harness binaries.** Linking an unproven IPC
-substrate into a shipping binary before slices 10 and 12 are green buys nothing and risks a live
-process.
+**Decision: the ring builds as libraries a consumer links (`libouroboros-ring` for a host,
+`libouroboros-ring-client` for a module process) and decides nothing about which of a consumer's
+binaries link them.**
 
-Enforced by `scripts/check_bus_blast_radius.sh`, which runs **as a required check on every slice PR**,
-not only at tree level. A tree-level-only gate would let a regression between slices 10 and 12 link the
-ring into a shipping binary and still pass every per-slice gate. *(Per-PR enforcement added in revision
-3.)*
-
-That pre-shipping rule is retained here as history. The current shipping boundary is below.
-
-### D7: revision 5: one shared local-ring library for both daemons
-
-The rule above ("the ring links into **no** shipping binary") held for the whole twelve-slice feature
-tree. **Delivery step 3 (the first real module migration onto the ring) deliberately ends it.** The
-per-action governed-action audit row (`modules/guardrails/guardrails_action_audit.c`) no longer calls
-the file writer directly; it publishes the row over the ring via `modules/audit/obs_bus.c`, whose
-consumer thread drains it to the ledger. This is an all-or-nothing migration. There is no flagged
-parallel direct path, so the ring becomes load-bearing for one real, off-critical-path operation.
-
-The blast-radius invariant is now the product link graph:
-
-- **Source.** Only `c/src/*` and `src/modules/audit/obs_bus.c` may include a ring header.
-- **Library.** All ring implementation objects enter `libouroboros-ring.a`; no shipping target names
-  individual ring objects.
-- **Consumers.** `aimee-server` and `aimee-kb` both link that same archive and host independent local
-  rings for modules in their own containers.
-- **Non-consumers.** The thin client does not link the ring. The ring never carries traffic between
-  machines; the shared connection library owns that traffic.
-
-The daemon-owned observability runtime and storage sinks remain outside the archive. In particular,
-the server installs its DB1 guardrail sink through `server/obs_bus_adapter.c`; the KB needs no fake
-DB1 stub. `scripts/check_bus_blast_radius.sh` enforces the library membership and consumer graph.
-
-**Durability note.** The old direct write `fflush`'d each row, so it was durable the instant it
-returned. The ring path is asynchronous: the producer publishes and returns, and the consumer writes
-sub-millisecond later. A graceful shutdown drains losslessly (`obs_bus_stop`, also via `atexit`),
-but a hard kill (`SIGKILL`/crash) can lose the few rows still in the ring. This is consistent with the
-audit row's pre-existing best-effort contract (`audit_action_log` already dropped silently when the
-log was not open) and is the accepted trade for moving the write off the caller's thread.
+While the ring lived inside aimee, D7 was aimee's link graph: first "no shipping binary links the
+ring", then, from aimee's first module migration, "these two daemons link one shared archive and
+nothing else does". Both were rules about one consumer, not about the ring, and they moved to aimee
+with the rest of its event-bus documentation. What stays here is the part every consumer inherits:
+the client library carries no host, routing, arena allocator or capture code, so a module process
+that links only `libouroboros-ring-client` cannot become a host.
 
 ---
 
@@ -390,7 +359,7 @@ Suite R1 excludes cgo ("no shared header, symbol, link edge, cgo boundary, or si
 and a Go client that linked the C implementation would defeat the conformance suite's purpose. It
 would test the C code twice and prove nothing about the spec.
 
-`scripts/check_bus_single_host.sh` enforces the corollary that there is exactly one host: `ouro_host_create`
+`scripts/check_single_host.sh` enforces the corollary that there is exactly one host: `ouro_host_create`
 is defined in exactly one translation unit; `memfd_create` is called from no file outside
 `c/src/region_host.c`; no Go file in `go/ring` creates regions or accepts attaches; and
 **no test in `go/ring` regenerates or shadows the slice-1 vectors**. The last clause matters
@@ -410,10 +379,10 @@ proof that it is total (**and the later tree decides what is done with the strea
 chaining, `policy_rev`, signing, and the attestation bundle. Nothing about the callback's timing or
 totality is left to that tree, and nothing about ledger semantics is decided here.
 
-This tree owes the seam and the proof that the seam is total, every `seq`-stamped event, exactly once, in `seq` order. Durable chaining,
-`policy_rev`, and the attestation bundle belong to
-[`ring-governance-and-capture.md`](../proposals/done/ring-governance-and-capture.md) and
-are not built here. The recording test double is the conformance vehicle, not a shipped feature.
+This tree owes the seam and the proof that the seam is total, every `seq`-stamped event, exactly once,
+in `seq` order. Durable chaining, `policy_rev`, and the attestation bundle belong to whatever consumer
+governs the stream, and are not built here. The recording test double is the conformance vehicle, not a
+shipped feature.
 
 ---
 

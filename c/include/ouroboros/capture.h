@@ -44,7 +44,7 @@ typedef enum
 #define OURO_CAP_F_MATERIALIZED 0x0001u
 
 /* A growable in-memory capture sink. The format on disk and in memory is
- * identical; a file writer is a thin wrapper a later tree can add. */
+ * identical; ouro_capture_flush_fd moves it to a file. */
 typedef struct
 {
    uint8_t *buf;
@@ -105,6 +105,30 @@ void ouro_capture_tap(void *ctx, const ouro_frame_t *frame, const uint8_t *paylo
 
 /* Free the sink's buffer. */
 void ouro_capture_free(ouro_capture_t *c);
+
+/* ---- writing to a file ---- */
+
+/* What ouro_capture_flush_fd did with the sink's pending bytes. */
+typedef enum
+{
+   OURO_CAPTURE_FLUSHED = 0,     /* every pending byte reached fd (or none was pending) */
+   OURO_CAPTURE_FLUSH_BROKEN,    /* the sink was already broken; nothing was written */
+   OURO_CAPTURE_FLUSH_LIMIT,     /* writing would pass the byte limit; nothing was written */
+   OURO_CAPTURE_FLUSH_WRITE_FAILED /* a write failed or wrote nothing; the file is cut short */
+} ouro_capture_flush_t;
+
+/* Append the sink's pending bytes to fd, then empty the sink without forgetting
+ * that the header was written, so one file stays a single seq-contiguous stream
+ * across any number of flushes. *written is the file's running byte count: it is
+ * advanced by what was written and checked against limit (0 = no limit) before
+ * anything is. On LIMIT or WRITE_FAILED the sink is marked broken and emptied, so
+ * the tap stops appending to a stream that can no longer be persisted; the file
+ * then reads as truncated, never corrupt. The caller owns fd and decides what a
+ * lost stream means. */
+ouro_capture_flush_t ouro_capture_flush_fd(ouro_capture_t *c, int fd, uint64_t *written,
+                                          uint64_t limit);
+
+const char *ouro_capture_flush_name(ouro_capture_flush_t r);
 
 /* ---- reading / replay ---- */
 
