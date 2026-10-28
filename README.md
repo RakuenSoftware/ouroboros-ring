@@ -19,7 +19,7 @@ and pins a release of it like any other.
 
 | Path | Language | What it is | Proven by |
 |---|---|---|---|
-| [`c/`](c/) | C11, POSIX/Linux | The host and a client, the module runtime, and the conformance host harness. `libouroboros-ring` (all of it) and `libouroboros-ring-client` (attach, wire, region, ring, module protocol: what a module process links) | `c/tests/` and the module runtime harness (15 tests, also under ASan/UBSan; the arena under TSan); dispatch overhead within the budget in `c/bench/baseline.json` |
+| [`c/`](c/) | C11, POSIX/Linux | The host and a client, the module runtime, and the conformance host harness. `libouroboros-ring` (all of it) and `libouroboros-ring-client` (attach, wire, region, ring, module protocol: what a module process links) | `c/tests/` and the module runtime harness (16 tests, also under ASan/UBSan; the arena under TSan); dispatch overhead within the budget in `c/bench/baseline.json` |
 | [`go/`](go/) | Go, no cgo | Client, module caller and module runtime: `github.com/RakuenSoftware/ouroboros-ring/go/ring` | `go test ./...` with `CGO_ENABLED=0`; `scripts/check_go_no_cgo.sh` |
 | [`rust/`](rust/) | Rust 2024 | Client, module caller and module runtime: crate `ouroboros-ring`, depending only on `libc` | `cargo test`; `rust/tests/c_host_conformance.rs` against the C host |
 
