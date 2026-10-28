@@ -1,6 +1,8 @@
 /* ouro_capture.c: capture stream writer, reader, and observational replay (D10). */
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <ouroboros/capture.h>
 #include <ouroboros/wire.h>
@@ -182,6 +184,60 @@ void ouro_capture_tap(void *ctx, const ouro_frame_t *frame, const uint8_t *paylo
 }
 
 /* ---- reading ---- */
+
+/* ---- writing to a file ---- */
+
+ouro_capture_flush_t ouro_capture_flush_fd(ouro_capture_t *c, int fd, uint64_t *written,
+                                          uint64_t limit)
+{
+   if (c->broken)
+      return OURO_CAPTURE_FLUSH_BROKEN;
+   if (c->len == 0)
+      return OURO_CAPTURE_FLUSHED;
+   uint64_t so_far = written ? *written : 0;
+   if (limit && (so_far > limit || c->len > limit - so_far))
+   {
+      c->broken = 1;
+      c->len = 0;
+      return OURO_CAPTURE_FLUSH_LIMIT;
+   }
+   size_t off = 0;
+   while (off < c->len)
+   {
+      ssize_t w = write(fd, c->buf + off, c->len - off);
+      if (w < 0 && errno == EINTR)
+         continue;
+      if (w <= 0)
+      {
+         if (written)
+            *written += off;
+         c->broken = 1;
+         c->len = 0;
+         return OURO_CAPTURE_FLUSH_WRITE_FAILED;
+      }
+      off += (size_t)w;
+   }
+   if (written)
+      *written += off;
+   c->len = 0; /* header_written and first_seq stay: the header is already in the file */
+   return OURO_CAPTURE_FLUSHED;
+}
+
+const char *ouro_capture_flush_name(ouro_capture_flush_t r)
+{
+   switch (r)
+   {
+   case OURO_CAPTURE_FLUSHED:
+      return "flushed";
+   case OURO_CAPTURE_FLUSH_BROKEN:
+      return "broken";
+   case OURO_CAPTURE_FLUSH_LIMIT:
+      return "limit";
+   case OURO_CAPTURE_FLUSH_WRITE_FAILED:
+      return "write_failed";
+   }
+   return "unknown";
+}
 
 const char *ouro_capture_status_name(ouro_capture_status_t s)
 {

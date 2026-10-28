@@ -1,0 +1,11 @@
+{
+  "description": "The ring's performance budget. Speed is a guardrail, not the point of the ring: each metric is an absolute ceiling that catches a gross regression (a per-event syscall, a lock on the hot path), not a comparison against an earlier build. Changing a ceiling is a reviewed change to this file, so 'within budget' always names a real, checkable number. scripts/check_perf_budget.sh enforces it in CI.",
+  "metrics": {
+    "dispatch_overhead_ns": {
+      "description": "Per-event dispatch: producer enqueue, host route, subscriber dequeue, excluding work on the payload. Median over batched samples from c/bench/dispatch.c, 16-byte inline payload.",
+      "ceiling_ns": 1000,
+      "observed_ns": 134,
+      "observed_note": "measured when the benchmark lived in aimee (reference dev box). The ceiling carries ~7x headroom so CI variance does not flake the check while a per-event syscall still trips it."
+    }
+  }
+}
