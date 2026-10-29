@@ -23,7 +23,7 @@ and pins a release of it like any other.
 
 | Path | Language | What it is | Proven by |
 |---|---|---|---|
-| [`c/`](c/) | C11, POSIX/Linux | The host and a client, the module runtime, and the conformance host harness. `libouroboros-ring` (all of it) and `libouroboros-ring-client` (attach, wire, region, ring, module protocol: what a module process links) | `c/tests/` and the module runtime harness (16 tests, also under ASan/UBSan; the arena under TSan); dispatch overhead within the budget in `c/bench/baseline.json` |
+| [`c/`](c/) | C11, POSIX/Linux | The host and a client, the module runtime, and the conformance host harness. `libouroboros-ring` (all of it) and `libouroboros-ring-client` (attach, wire, region, ring, module protocol: what a module process links) | `c/tests/` and the module runtime harness (17 tests, also under ASan/UBSan; the arena under TSan); dispatch overhead within the budget in `c/bench/baseline.json` |
 | [`go/`](go/) | Go, no cgo | Client, module caller and module runtime: `github.com/RakuenSoftware/ouroboros-ring/go/ring` | `go test ./...` with `CGO_ENABLED=0`; `scripts/check_go_no_cgo.sh` |
 | [`rust/`](rust/) | Rust 2024 | Client, module caller and module runtime: crate `ouroboros-ring`, depending only on `libc` | `cargo test`; `rust/tests/c_host_conformance.rs` against the C host |
 
@@ -74,8 +74,10 @@ Unix socket paths are limited to 108 bytes; run the tests with a short `TMPDIR`.
   as CMake packages (`find_package(ouroboros-ring)`, targets `ouroboros::...`)
   and pkg-config files. Headers are `<ouroboros/*.h>`; every public name is
   prefixed `ouro_` / `OURO_`. A host that runs some of its own clients attaches
-  them with `ouro_host_attach_local` (`<ouroboros/local_attach.h>`) and can
-  persist a capture stream with `ouro_capture_flush_fd`. Large payloads:
+  them with `ouro_host_attach_local` (`<ouroboros/local_attach.h>`), can
+  persist a capture stream with `ouro_capture_flush_fd`, and can make many
+  module calls at once over a pool of those clients
+  (`ouro_module_client_pool_*` in `<ouroboros/module_client.h>`). Large payloads:
   [`docs/arena-payloads.md`](docs/arena-payloads.md).
 - **Go:** `go get github.com/RakuenSoftware/ouroboros-ring/go@v<VERSION>`, then
   import `github.com/RakuenSoftware/ouroboros-ring/go/ring`.
