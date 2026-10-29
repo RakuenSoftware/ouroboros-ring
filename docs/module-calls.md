@@ -146,6 +146,17 @@ late reply to an earlier call on the next one. The outcome is one of:
 | `TRANSPORT`, `PROTOCOL` | the ring failed, or the reply was not a valid envelope for this call |
 | `INVALID_ARGUMENT` | the call itself was malformed |
 
+One module client makes one call at a time. A C process that makes many calls
+at once attaches several of its own clients and pools them
+(`ouro_module_client_pool_t`, since 0.1.3): each call checks out a free client
+and returns it after. A caller that finds every client busy waits only within
+its own deadline (30 seconds when it has none) and gets `DEADLINE_EXCEEDED`
+rather than queueing without end; `ouro_module_client_pool_stop` refuses new
+calls with `TRANSPORT` and cancels those in flight; `ouro_module_client_pool_peak`
+reports the most calls in flight at once, so a pool that peaks at its size is
+serializing its callers. The pool is a convenience of the C implementation, not
+part of the contract.
+
 Go has `ring.NewModuleCaller` and, for many goroutines sharing one client,
 `ring.NewConcurrentModuleCaller`; Rust has `ModuleCaller`. All three map
 outcomes to the same results, which `OURO_TEST_MODULE_CALLER` checks across
