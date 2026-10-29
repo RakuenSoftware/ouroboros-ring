@@ -1,11 +1,11 @@
 //! Cross-language interop: this Rust client against the single in-source C
 //! host, across a process boundary. The C host runs inside
-//! `ring-conformance-host` together with an internal C client that acks
+//! `ouroboros-ring-conformance-host` together with an internal C client that acks
 //! notifications, serves an echo kind, and reports cancels.
 //!
-//! Ignored by a plain `cargo test` because it needs the built harness;
-//! `scripts/test_bus_rust_conformance.sh` builds it and runs this with
-//! `--ignored`, so in CI it cannot be skipped silently.
+//! Ignored by a plain `cargo test` because it needs the built harness; the
+//! `rust` CI job builds it and runs this with `--ignored`, so in CI it cannot
+//! be skipped silently.
 
 use ouroboros_ring::wire::{F_REPLY, F_REQUEST, KIND_CAPABILITY_ABSENT};
 use ouroboros_ring::{Client, Event, RingError};
@@ -102,7 +102,7 @@ fn poll_for(c: &Client, what: &str, pred: impl Fn(&Event) -> bool) -> Event {
 
 fn start_harness() -> (Harness, PathBuf) {
     let harness = std::env::var("OURO_CONFORMANCE_HOST")
-        .expect("OURO_CONFORMANCE_HOST must name the built bus-conformance-host");
+        .expect("OURO_CONFORMANCE_HOST must name the built ouroboros-ring-conformance-host");
     // A short directory keeps the socket path under sun_path's limit.
     let base = std::env::var_os("TMPDIR")
         .map(PathBuf::from)
@@ -125,7 +125,7 @@ fn start_harness() -> (Harness, PathBuf) {
 }
 
 #[test]
-#[ignore = "needs the C bus-conformance-host; run by scripts/test_bus_rust_conformance.sh"]
+#[ignore = "needs the C ouroboros-ring-conformance-host; run by the rust CI job"]
 fn rust_client_against_c_host() {
     let (_harness, sock) = start_harness();
 

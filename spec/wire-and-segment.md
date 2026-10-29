@@ -249,28 +249,27 @@ producer→consumer arena allocation across that process boundary remains outsid
 - Arena access is bounded to leased regions; a client cannot read arbitrary arena bytes outside its
   active leases (enforced by the client library and validated by conformance; a hostile native client
   in the trusted tier is out of this boundary's threat model, untrusted clients run sandboxed per
-  [`module-loader.md`](../pending/module-loader.md)).
+  by the embedding's module loader).
 
 ## Conformance
 
 The spec is validated, not defined, by its implementations. All of the following are built and green
-(see [Implementation status](#implementation-status)):
+(see [Implementation status](#implementations)):
 
 - **Wire vectors**: shared encode/decode fixtures for headers, each message pattern, version
-  negotiation, and error frames; the C and Go reference clients both produce and accept the exact
-  bytes. Committed in `vectors/wire_vectors.tsv`, generated independently of either
+  negotiation, and error frames; the C, Go and Rust reference clients all produce and accept the
+  exact bytes. Committed in `vectors/wire_vectors.tsv`, generated independently of every
   codec by `vectors/gen_wire_vectors.py` (10 positive + 13 negative rows).
-- **Interop**: the single in-source C host driven with a C client and a real Go client across a
-  process boundary, exchanging notifications and request/replies in both directions, including
-  `capability_absent`, cancel, and reaped-client recovery. Backpressure/credit exhaustion is a
-  language-independent host and client-ring property, proven in-process
-  (`test_bus_flow`, and the C/Go client `would_block` paths).
-- **No-second-host**: exactly one host implementation; `scripts/check_bus_single_host.sh` fails a
-  second `ouro_host_create` and confirms the Go side is client-only.
-- **Third-language proof**: a client in a language other than C/Go, written only from this spec and
-  the vectors, attaches and interoperates, the credibility test for "any language." *Not yet
-  written; the two-language agreement and the language-neutral vectors are what make it possible, and
-  a later contributor can add one without any change here.*
+- **Interop**: the single C host (`c/conformance/host.c`) driven with an internal C client and a
+  real Go or Rust client across a process boundary, exchanging notifications and request/replies in
+  both directions, including `capability_absent` and arena payloads in all three patterns.
+  Backpressure/credit exhaustion is a language-independent host and client-ring property, proven
+  in-process (`c/tests/test_flow.c`, and the clients' `would_block` paths).
+- **No-second-host**: exactly one host implementation; `scripts/check_single_host.sh` fails a
+  second `ouro_host_create` and confirms the Go and Rust sides are client-only.
+- **Third-language proof**: the Rust client ([D11](decisions.md#d11-the-rust-reference-client-is-a-third-independent-client)),
+  written from this spec and the vectors, attaches to the C host and interoperates, the
+  credibility test for "any language". A fourth needs no change here.
 
 ## Non-goals
 
@@ -292,7 +291,7 @@ Answered in v0 (settled by the decisions in
   `control_lost` backstop.
 - ~~Exact slot size and inline-payload budget.~~ **Control-region parameters** read at attach, not
   wire fields (D4); provisional 256/192/1024 set in slice 3, the dispatch-overhead ceiling committed
-  in `bench/bus_baseline.json`.
+  in `c/bench/baseline.json`.
 
 Still open for a later version (out of v0 scope):
 

@@ -1,4 +1,4 @@
-/* test_bus_wire.c: slice 1 of the ring feature tree.
+/* test_wire.c: slice 1 of the ring feature tree.
  *
  * Three jobs, deliberately kept separate:
  *
@@ -849,7 +849,7 @@ static void test_placement_bounds(void)
 
 int main(void)
 {
-   printf("test_bus_wire:\n");
+   printf("test_wire:\n");
    verify_vectors();
    test_pattern_matrix();
    test_combination_matrix();
@@ -857,6 +857,6 @@ int main(void)
    test_rejections();
    test_placement_bounds();
    test_decode_checked();
-   printf("test_bus_wire: OK\n");
+   printf("test_wire: OK\n");
    return 0;
 }

@@ -1,4 +1,4 @@
-/* test_bus_route.c: slice 6 of the ring feature tree.
+/* test_route.c: slice 6 of the ring feature tree.
  *
  * Routing and the tap, checked as outcomes:
  *
@@ -955,7 +955,7 @@ static void test_concurrent_requesters_share_a_correlation(void)
 
 int main(void)
 {
-   printf("test_bus_route:\n");
+   printf("test_route:\n");
    test_notification_observer_routing();
    test_request_reply();
    test_concurrent_requesters_share_a_correlation();
@@ -973,6 +973,6 @@ int main(void)
    test_arena_request_reply();
    test_arena_request_no_server();
    test_arena_reply_forged_dropped();
-   printf("test_bus_route: OK\n");
+   printf("test_route: OK\n");
    return 0;
 }

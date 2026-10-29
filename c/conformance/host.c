@@ -1,4 +1,4 @@
-/* bus_conformance_host.c: the C ring host, exposed on a Unix socket so an
+/* conformance/host.c: the C ring host, exposed on a Unix socket so an
  * external client — notably the Go reference client — can attach and interoperate
  * with the single in-source C host across a process boundary. This is the
  * cross-language conformance vehicle (slice 10): two independent client
@@ -24,7 +24,7 @@
  *   - KIND_ARENA_REPLY_ASK: the C side answers with an arena-placed REPLY. The
  *     host routes all three arena patterns, so all three are proven here.
  *
- * Usage: bus_conformance_host <socket-path> [timeout-ms]
+ * Usage: ouroboros-ring-conformance-host <socket-path> [timeout-ms]
  * It listens, accepts exactly one external client, pumps and services until the
  * external client disconnects or the timeout elapses, then exits 0. A bounded
  * timeout means it can never hang CI.

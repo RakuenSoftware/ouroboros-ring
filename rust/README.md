@@ -30,7 +30,7 @@ module runtimes fragment inline, as the C and Go ones do.
 ## Independence
 
 The crate depends on `libc` only, has no build script, and links nothing from the C or Go
-implementations. `scripts/check_bus_single_host.sh` enforces that and holds it to client-only.
+implementations. `scripts/check_single_host.sh` enforces that and holds it to client-only.
 The frame codec is held to `wire_vectors.tsv`; region, ring, lease-view, attach and AMOD layouts to
 `layout_vectors.tsv` (`src/layout.rs`). Both tables are generated from the specification, not from
 either implementation; see D11 and D12 in `spec/decisions.md`.
@@ -42,7 +42,7 @@ make -C src rust-ring-tests
 ```
 
 That runs rustfmt, clippy with warnings as errors, the unit tests and both vector tables, then the
-interop legs: this client against the C host (`ring-conformance-host`, including arena reads), the
+interop legs: this client against the C host (`ouroboros-ring-conformance-host`, including arena reads), the
 `ouroboros-ring-module-helper` process under the C module-runtime caller (`ouroboros-ring-module-runtime-harness` (`c/conformance/module_runtime.c`)),
 and `ouroboros-ring-module-caller-check`, the Rust caller as its own admitted process, against the C
 runtime's module and against the Rust module process.

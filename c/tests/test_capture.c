@@ -1,4 +1,4 @@
-/* test_bus_capture.c: slice 11 of the ring feature tree.
+/* test_capture.c: slice 11 of the ring feature tree.
  *
  * The capture stream and observational replay (D10):
  *
@@ -431,7 +431,7 @@ static void test_flush_limit_and_failure(void)
 
 int main(void)
 {
-   printf("test_bus_capture:\n");
+   printf("test_capture:\n");
    test_roundtrip_and_replay();
    test_materialized_payload();
    test_end_to_end_host();
@@ -439,6 +439,6 @@ int main(void)
    test_terminal_states();
    test_flush_to_file();
    test_flush_limit_and_failure();
-   printf("test_bus_capture: OK\n");
+   printf("test_capture: OK\n");
    return 0;
 }

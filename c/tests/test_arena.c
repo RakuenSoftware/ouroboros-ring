@@ -1,4 +1,4 @@
-/* test_bus_arena.c: slice 4 of the ring feature tree.
+/* test_arena.c: slice 4 of the ring feature tree.
  *
  * The lease allocator's whole reason to exist is that a slow or dead peer must
  * not corrupt a live reader, so the tests are the D3 lifecycle and its three
@@ -430,7 +430,7 @@ static void test_holds_and_cancel_by(void)
 
 int main(void)
 {
-   printf("test_bus_arena:\n");
+   printf("test_arena:\n");
    test_lifecycle();
    test_stale_generation();
    test_cap_synchronous();
@@ -441,6 +441,6 @@ int main(void)
    test_capacity_stress();
    test_view_mirror();
    test_holds_and_cancel_by();
-   printf("test_bus_arena: OK\n");
+   printf("test_arena: OK\n");
    return 0;
 }

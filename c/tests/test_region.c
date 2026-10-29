@@ -1,4 +1,4 @@
-/* test_bus_region.c: slice 3 of the ring feature tree.
+/* test_region.c: slice 3 of the ring feature tree.
  *
  * The regions are the D1 isolation boundary, so the tests check the boundary as
  * a fact rather than a convention:
@@ -464,7 +464,7 @@ static void test_lease_view(void)
 
 int main(void)
 {
-   printf("test_bus_region:\n");
+   printf("test_region:\n");
    test_control_roundtrip();
    test_control_readonly_faults();
    test_control_corruption_refused();
@@ -472,6 +472,6 @@ int main(void)
    test_qpair_roundtrip();
    test_arena_region();
    test_lease_view();
-   printf("test_bus_region: OK\n");
+   printf("test_region: OK\n");
    return 0;
 }
