@@ -4,6 +4,7 @@
 
 #include <ouroboros/module_protocol.h>
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -295,4 +296,165 @@ const char *ouro_module_call_result_name(ouro_module_call_result_t result)
                                        "INTERNAL",  "RESPONSE_TOO_LARGE", "TRANSPORT",
                                        "PROTOCOL",  "INVALID_ARGUMENT"};
    return (unsigned)result < sizeof(names) / sizeof(names[0]) ? names[result] : "UNKNOWN";
+}
+
+/* ---- pool ---- */
+
+/* Waiting for a client is bounded even without a deadline: an unbounded wait
+ * on a busy pool is indistinguishable from a deadlock. */
+#define POOL_UNBOUNDED_WAIT_S 30
+
+int ouro_module_client_pool_init(ouro_module_client_pool_t *pool, ouro_client_t *const *rings,
+                                 size_t count)
+{
+   if (!pool || !rings || count == 0 || count > OURO_MODULE_CLIENT_POOL_MAX)
+      return -1;
+   memset(pool, 0, sizeof(*pool));
+   pthread_condattr_t attr;
+   if (pthread_condattr_init(&attr) != 0)
+      return -1;
+   /* The pool waits against monotonic deadlines, so its condition must too. */
+   int cond_ok = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0 &&
+                 pthread_cond_init(&pool->freed, &attr) == 0;
+   pthread_condattr_destroy(&attr);
+   if (!cond_ok)
+      return -1;
+   if (pthread_mutex_init(&pool->lock, NULL) != 0)
+   {
+      pthread_cond_destroy(&pool->freed);
+      return -1;
+   }
+   for (size_t i = 0; i < count; ++i)
+   {
+      if (ouro_module_client_init(&pool->clients[i], rings[i]) != 0)
+      {
+         while (i-- > 0)
+            ouro_module_client_destroy(&pool->clients[i]);
+         pthread_mutex_destroy(&pool->lock);
+         pthread_cond_destroy(&pool->freed);
+         return -1;
+      }
+   }
+   pool->count = count;
+   atomic_init(&pool->stopping, 0);
+   pool->initialized = 1;
+   return 0;
+}
+
+/* Check out a free client, waiting no later than deadline_ns. -1 when none
+ * freed in time or the pool is stopping. */
+static int pool_acquire(ouro_module_client_pool_t *pool, uint64_t deadline_ns)
+{
+   struct timespec until;
+   if (deadline_ns)
+   {
+      until.tv_sec = (time_t)(deadline_ns / 1000000000ULL);
+      until.tv_nsec = (long)(deadline_ns % 1000000000ULL);
+   }
+   else
+   {
+      if (clock_gettime(CLOCK_MONOTONIC, &until) != 0)
+         return -1;
+      until.tv_sec += POOL_UNBOUNDED_WAIT_S;
+   }
+   pthread_mutex_lock(&pool->lock);
+   for (;;)
+   {
+      if (atomic_load_explicit(&pool->stopping, memory_order_acquire))
+         break;
+      for (size_t i = 0; i < pool->count; ++i)
+      {
+         if (!pool->in_use[i])
+         {
+            pool->in_use[i] = 1;
+            if (++pool->in_flight > pool->peak_in_flight)
+               pool->peak_in_flight = pool->in_flight;
+            pthread_mutex_unlock(&pool->lock);
+            return (int)i;
+         }
+      }
+      if (pthread_cond_timedwait(&pool->freed, &pool->lock, &until) == ETIMEDOUT)
+         break;
+   }
+   pthread_mutex_unlock(&pool->lock);
+   return -1;
+}
+
+static void pool_release(ouro_module_client_pool_t *pool, int index)
+{
+   pthread_mutex_lock(&pool->lock);
+   pool->in_use[index] = 0;
+   pool->in_flight--;
+   pthread_cond_signal(&pool->freed);
+   pthread_mutex_unlock(&pool->lock);
+}
+
+typedef struct
+{
+   ouro_module_client_pool_t *pool;
+   ouro_module_cancelled_fn cancelled;
+   void *context;
+} pool_cancel_t;
+
+static int pool_cancelled(void *context)
+{
+   const pool_cancel_t *state = context;
+   return atomic_load_explicit(&state->pool->stopping, memory_order_acquire) ||
+          (state->cancelled && state->cancelled(state->context));
+}
+
+ouro_module_call_result_t ouro_module_client_pool_call(
+    ouro_module_client_pool_t *pool, uint32_t event_kind, uint32_t stage_id, uint64_t trace_id,
+    uint64_t deadline_ns, const void *request_body, uint32_t request_len, void *response_body,
+    uint32_t response_capacity, uint32_t *response_len, ouro_module_cancelled_fn cancelled,
+    void *cancel_context)
+{
+   if (response_len)
+      *response_len = 0;
+   if (!pool || !pool->initialized)
+      return OURO_MODULE_CALL_INVALID_ARGUMENT;
+   if (atomic_load_explicit(&pool->stopping, memory_order_acquire))
+      return OURO_MODULE_CALL_TRANSPORT;
+   int index = pool_acquire(pool, deadline_ns);
+   if (index < 0)
+      return atomic_load_explicit(&pool->stopping, memory_order_acquire)
+                 ? OURO_MODULE_CALL_TRANSPORT
+                 : OURO_MODULE_CALL_DEADLINE_EXCEEDED;
+   pool_cancel_t state = {.pool = pool, .cancelled = cancelled, .context = cancel_context};
+   ouro_module_call_result_t result = ouro_module_client_call(
+       &pool->clients[index], event_kind, stage_id, trace_id, deadline_ns, request_body,
+       request_len, response_body, response_capacity, response_len, pool_cancelled, &state);
+   pool_release(pool, index);
+   return result;
+}
+
+void ouro_module_client_pool_stop(ouro_module_client_pool_t *pool)
+{
+   if (!pool || !pool->initialized)
+      return;
+   pthread_mutex_lock(&pool->lock);
+   atomic_store_explicit(&pool->stopping, 1, memory_order_release);
+   pthread_cond_broadcast(&pool->freed);
+   pthread_mutex_unlock(&pool->lock);
+}
+
+int ouro_module_client_pool_peak(ouro_module_client_pool_t *pool)
+{
+   if (!pool || !pool->initialized)
+      return 0;
+   pthread_mutex_lock(&pool->lock);
+   int peak = pool->peak_in_flight;
+   pthread_mutex_unlock(&pool->lock);
+   return peak;
+}
+
+void ouro_module_client_pool_destroy(ouro_module_client_pool_t *pool)
+{
+   if (!pool || !pool->initialized)
+      return;
+   for (size_t i = 0; i < pool->count; ++i)
+      ouro_module_client_destroy(&pool->clients[i]);
+   pthread_mutex_destroy(&pool->lock);
+   pthread_cond_destroy(&pool->freed);
+   memset(pool, 0, sizeof(*pool));
 }
