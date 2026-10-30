@@ -17,7 +17,7 @@ sequenceDiagram
     participant H as host
     participant A as admission hook<br/>(embedding)
     participant B as attach hook<br/>(embedding)
-    C->>H: connect, send attach request<br/>(magic ABRQ, wire_version min..max, principal_class, principal_ref)
+    C->>H: connect, send attach request<br/>(magic ABRQ, wire_version min..max, principal_class, principal_ref, capabilities)
     H->>H: check the client's version range includes the host's
     H->>A: admit(ctx, attach_fd, request)
     A-->>H: OK or a typed refusal
@@ -25,7 +25,7 @@ sequenceDiagram
         H->>H: allocate a directory slot, create its queue-pair memfd
         H->>B: bind(ctx, host, slot, request)
         B-->>H: OK (subscriptions, served kinds, outbound grants set)
-        H-->>C: reply (magic ABRP, OK, handle, negotiated version, geometry, host_epoch)<br/>+ SCM_RIGHTS: control, arena, queue pair
+        H-->>C: reply (magic ABRP, OK, handle, negotiated version, granted capabilities, geometry, host_epoch)<br/>+ SCM_RIGHTS: control, arena, queue pair (+ host and client doorbells)
         C->>C: map control read-only, arena and queue pair read/write
     else refused at either hook
         H->>H: roll the slot back
@@ -51,8 +51,14 @@ sequenceDiagram
 - **Reply.** `ouro_attach_reply_t` carries the outcome, the client's handle,
   the negotiated wire version, the geometry (`slot_size`, `inline_budget`,
   `queue_capacity`, `arena_size`) and the `host_epoch`. On success it travels
-  with exactly three descriptors, in this order, in one `sendmsg`: control,
-  arena, the client's queue pair.
+  with three descriptors, in this order, in one `sendmsg`: control, arena, the
+  client's queue pair. A client that asked for a doorbell
+  (`OURO_ATTACH_CAP_DOORBELL` in the request's `capabilities`) and was granted
+  one, as the reply's `capabilities` says, receives two more: the host doorbell
+  and its own
+  ([D13](../spec/decisions.md#d13-doorbells-idle-ends-sleep-in-the-kernel)).
+  The request is 20 bytes; a host also accepts the 16-byte request that predates
+  `capabilities`, and an older host reads only those 16 bytes of a newer one.
 
 The client reads its geometry from the reply and the control region. It is
 never compiled against those values, which is why the host can re-tune them
@@ -94,7 +100,7 @@ flowchart TB
     peer -- yes --> dup{"a live slot already<br/>holds this principal?"}
     dup -- "yes, and its process<br/>is still running" --> deny
     dup -- "no, or its process has exited<br/>(pidfd)" --> bind["release the stale slot if any,<br/>enforce grants, subscribe,<br/>serve, grant outbound kinds"]
-    bind --> ok["OK: reply + three descriptors"]
+    bind --> ok["OK: reply + three descriptors<br/>(five with a doorbell)"]
 ```
 
 A grant is one file per installed program in a policy directory

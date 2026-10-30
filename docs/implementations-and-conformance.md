@@ -16,6 +16,8 @@ about the contract rather than one codebase agreeing with itself.
 | Reading arena payloads in place (D12) | yes | yes | yes, copied out at once |
 | Module runtime (serving stages) | `ouro_module_process_run` | `ring.RunModuleProcess` | `run_module_process` |
 | Module caller (calling stages) | `ouro_module_client_call` | `ring.ModuleCaller`, `ring.ConcurrentModuleCaller` | `ModuleCaller` |
+| Sleeping on the doorbell (D13) | `ouro_host_wait`, `ouro_client_wait` | `Client.Wait` | `Client::wait` |
+| Notifications to modules and callers (D14) | `notify`, `overflow` | `Notify`, `Overflow`, `OnNotification`, `Publish` | `notify`, `overflow`, `started` |
 | Runtime listener and grant files | `ouro_runtime_*` | no | no |
 | Dependencies | libc, pthreads | `golang.org/x/sys/unix`, no cgo | `libc` only, no build script |
 
@@ -56,7 +58,10 @@ flowchart TB
    arena notifications of 1, 193, 5000 and 60000 bytes through the lease view and
    returns the references, serves an arena-placed request, and receives an
    arena-placed reply. A stats request then shows the producer's live leases have
-   drained.
+   drained. The host sleeps on its doorbell between pumps, and the external
+   client proves both directions of D13: it is woken by a delayed publish while
+   asleep in its wait, and its own publish after an idle second is answered
+   long before the host's timeout.
 3. **The module-runtime harness.** `ouroboros-ring-module-runtime-harness
    MODULE_BINARY` drives a module process written in another language with the C
    module caller. With `OURO_TEST_MODULE_CALLER` set, it also runs that

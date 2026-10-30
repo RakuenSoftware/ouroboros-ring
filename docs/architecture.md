@@ -133,9 +133,10 @@ sequenceDiagram
 
 The host's pump is a function, `ouro_host_pump`, that drains every outbound ring
 once and returns. The ring starts no thread for it: the embedding decides when
-to pump, under the same lock it uses for attach and reap. The reference module
-runtime and module caller poll their own inbound rings with short sleeps when
-idle.
+to pump, under the same lock it uses for attach and reap, and sleeps between
+pumps in `ouro_host_wait`. Every client sleeps on its own doorbell the same way,
+so an idle ring makes no wakeups but heartbeats
+([sleeping and waking](routing-and-flow-control.md#sleeping-and-waking)).
 
 ## Lifetimes and liveness
 

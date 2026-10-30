@@ -708,6 +708,9 @@ the other side is awake.
    - The host also signals a client after it consumes from that client's outbound ring. A client
      whose publish returned `would_block` can then sleep until there is room, instead of polling for
      it.
+   - Symmetrically, a client signals the host after it consumes from its inbound ring. A producer
+     the host is holding for a full destination (D5) is then retried as soon as there is room. The
+     host does not count a held producer as work when deciding to sleep, so it never spins on one.
 
 The fences pair as in Dekker's algorithm: either the sleeper's re-check sees the commit, or the
 signaller's load sees the flag. A spurious wakeup costs one empty check. A missed one cannot
@@ -749,9 +752,11 @@ stage, each of those asks is a durable audit row.
   consumer that keeps derived state treats it as "re-read what you depend on". The ring guarantees a
   slot either receives each event it subscribes to or is told it missed one, so this is the only
   reconciliation a subscriber needs, besides one at attach.
-- **Publishing.** `Publish` on the module process or caller sends a notification on that process's
-  own slot, under that slot's grants. A ring full of undrained events is backpressure: the publisher
-  waits on its doorbell until the host has consumed, and gives up only on its context.
+- **Publishing.** A module process or caller publishes a notification on its own slot, under that
+  slot's grants: Go through the `Publisher` its `Started` hook receives and
+  `ConcurrentModuleCaller.Publish`, Rust through the client its `started` hook receives, C through
+  `ouro_client_publish` on the loop's client. A full outbound ring is backpressure from the host;
+  the publisher retries until its context ends.
 
 ---
 

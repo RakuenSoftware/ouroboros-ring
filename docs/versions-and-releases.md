@@ -56,7 +56,9 @@ Some changes need none of these:
 - **Additions in reserved space** are announced by a control-region flag that
   older readers ignore, so `layout_version` stays put. The lease view (D12) was
   added this way: `OURO_CONTROL_F_LEASE_VIEW`, with its slot count and offset in
-  fields that every earlier host left zero.
+  fields that every earlier host left zero. So were doorbells (D13):
+  `OURO_CONTROL_F_DOORBELL`, the two waiting flags, and an attach request that
+  grew by a `capabilities` word an older host never reads.
 
 A host and client agree the wire version at attach
 ([attach and admission](attach-and-admission.md)). Capture files carry their
