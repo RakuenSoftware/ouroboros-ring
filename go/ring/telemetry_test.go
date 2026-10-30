@@ -3,6 +3,7 @@ package ring
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -160,5 +161,18 @@ func TestTelemetryConformance(t *testing.T) {
 	}
 	if r.Dropped() != 0 {
 		t.Errorf("dropped %d", r.Dropped())
+	}
+
+	// D15: a consumer asleep on the doorbell wakes when the host exits.
+	start := time.Now()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = cmd.Process.Kill()
+	}()
+	if _, err := r.Wait(10 * time.Second); !errors.Is(err, ErrEpoch) {
+		t.Fatalf("wait after the host exited: %v", err)
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Errorf("woke %v after the host exited, not at once", waited)
 	}
 }

@@ -210,6 +210,7 @@ func AttachTelemetry(sock int, principalClass uint32, principalRef uint32) (*Cli
 		c.Detach()
 		return nil, nil, err
 	}
+	r.host = hostProcess(sock)
 	return c, r, nil
 }
 

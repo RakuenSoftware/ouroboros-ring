@@ -95,6 +95,21 @@ type TelemetryReader struct {
 	waiting *uint32
 	dropped *uint64
 	bell    int
+	host    int // D15: a pidfd on the host, -1 where none could be opened
+}
+
+// hostProcess opens a process handle on the peer of the attach socket (D15),
+// so a consumer asleep on the doorbell wakes when the host exits.
+func hostProcess(sock int) int {
+	cred, err := unix.GetsockoptUcred(sock, unix.SOL_SOCKET, unix.SO_PEERCRED)
+	if err != nil || cred.Pid <= 0 {
+		return -1
+	}
+	fd, err := unix.PidfdOpen(int(cred.Pid), 0)
+	if err != nil {
+		return -1
+	}
+	return fd
 }
 
 func openTelemetryReader(regionFd, bellFd int) (*TelemetryReader, error) {
@@ -133,7 +148,7 @@ func openTelemetryReader(regionFd, bellFd int) (*TelemetryReader, error) {
 		return nil, err
 	}
 	return &TelemetryReader{
-		mem: mem, ring: r, bell: bellFd,
+		mem: mem, ring: r, bell: bellFd, host: -1,
 		waiting: u32ptr(mem, telemetryRegionOffWaiting),
 		dropped: u64ptr(mem, telemetryRegionOffDropped),
 	}, nil
@@ -173,7 +188,7 @@ func (t *TelemetryReader) Dropped() uint64 { return atomic.LoadUint64(t.dropped)
 
 // Wait sleeps until a record is available or timeout passes (negative waits
 // indefinitely), under the D13 protocol. It reports whether records are
-// available.
+// available, and returns ErrEpoch once the host has exited (D15).
 func (t *TelemetryReader) Wait(timeout time.Duration) (bool, error) {
 	atomic.StoreUint32(t.waiting, 1)
 	defer atomic.StoreUint32(t.waiting, 0)
@@ -185,15 +200,24 @@ func (t *TelemetryReader) Wait(timeout time.Duration) (bool, error) {
 		ms = int((timeout + time.Millisecond - 1) / time.Millisecond)
 	}
 	fds := []unix.PollFd{{Fd: int32(t.bell), Events: unix.POLLIN}}
+	if t.host >= 0 {
+		fds = append(fds, unix.PollFd{Fd: int32(t.host), Events: unix.POLLIN})
+	}
 	n, err := unix.Poll(fds, ms)
 	if err != nil && err != unix.EINTR {
 		return false, err
 	}
-	if n > 0 {
+	if n > 0 && fds[0].Revents&unix.POLLIN != 0 {
 		var count [8]byte
 		_, _ = unix.Read(t.bell, count[:])
 	}
-	return t.Available() > 0, nil
+	if t.Available() > 0 {
+		return true, nil
+	}
+	if n > 0 && len(fds) > 1 && fds[1].Revents != 0 {
+		return false, ErrEpoch
+	}
+	return false, nil
 }
 
 // Interrupt wakes Wait from another goroutine.
@@ -209,5 +233,9 @@ func (t *TelemetryReader) Close() {
 	if t.bell >= 0 {
 		unix.Close(t.bell)
 		t.bell = -1
+	}
+	if t.host >= 0 {
+		unix.Close(t.host)
+		t.host = -1
 	}
 }

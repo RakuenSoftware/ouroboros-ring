@@ -81,3 +81,50 @@ func keepAlive(ctx context.Context, client heartbeater, interval time.Duration) 
 		}
 	}()
 }
+
+// ErrTelemetryNotGranted is returned when the host attached the client but
+// did not hand it the telemetry consumer end (D16): telemetry is off, the
+// embedding did not grant this principal, or another consumer holds it.
+var ErrTelemetryNotGranted = errors.New("ring: telemetry consumer end not granted")
+
+// ConnectTelemetry attaches to a daemon's ring as its telemetry consumer
+// (D16). Refused connections are retried as ConnectClient retries them.
+func ConnectTelemetry(ctx context.Context, socketPath string, principalClass, principalRef uint32) (*Client, *TelemetryReader, error) {
+	if socketPath == "" {
+		return nil, nil, ErrModuleConfig
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			return nil, nil, err
+		}
+		err = unix.Connect(fd, &unix.SockaddrUnix{Name: socketPath})
+		if err == nil {
+			client, reader, attachErr := AttachTelemetry(fd, principalClass, principalRef)
+			unix.Close(fd)
+			if attachErr != nil {
+				return nil, nil, attachErr
+			}
+			if reader == nil {
+				client.Detach()
+				return nil, nil, ErrTelemetryNotGranted
+			}
+			if !client.HasProcessLiveness() {
+				keepAlive(ctx, client, clientHeartbeatInterval)
+			}
+			return client, reader, nil
+		}
+		unix.Close(fd)
+		if !errors.Is(err, unix.ECONNREFUSED) {
+			return nil, nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-time.After(moduleConnectRetry):
+		}
+	}
+}
