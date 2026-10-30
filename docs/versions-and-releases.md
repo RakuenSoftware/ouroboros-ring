@@ -60,7 +60,9 @@ Some changes need none of these:
   `OURO_CONTROL_F_DOORBELL`, the two waiting flags, and an attach request that
   grew by a `capabilities` word an older host never reads. Process liveness
   (D15) is one more bit in that word and one reserved `client_heartbeat` value,
-  `OURO_HEARTBEAT_DETACHED`, which no clock reading takes.
+  `OURO_HEARTBEAT_DETACHED`, which no clock reading takes. Telemetry (D16) is
+  a third bit, `OURO_ATTACH_CAP_TELEMETRY`, and a region of its own that only a
+  client granted it receives, so no existing layout changes.
 
 A host and client agree the wire version at attach
 ([attach and admission](attach-and-admission.md)). Capture files carry their
