@@ -151,6 +151,45 @@ pub(crate) fn recv_with_fds(
     Ok((n, fds, truncated))
 }
 
+/// Add one to an eventfd counter (D13). EAGAIN means the counter is already
+/// non-zero, so the sleeper wakes anyway.
+pub(crate) fn eventfd_ring(fd: RawFd) {
+    let one = 1u64.to_ne_bytes();
+    loop {
+        // SAFETY: an 8-byte write of a local buffer.
+        let n = unsafe { libc::write(fd, one.as_ptr() as *const libc::c_void, one.len()) };
+        if n >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return;
+        }
+    }
+}
+
+/// Wait up to `timeout_ms` (negative: forever) for `fd` to be readable, then
+/// reset its eventfd counter. A signal ends the wait as a timeout would.
+pub(crate) fn eventfd_wait(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd.
+    let n = unsafe { libc::poll(&mut p, 1, timeout_ms) };
+    if n < 0 {
+        let err = io::Error::last_os_error();
+        return if err.kind() == io::ErrorKind::Interrupted {
+            Ok(false)
+        } else {
+            Err(err)
+        };
+    }
+    if n > 0 {
+        let mut count = [0u8; 8];
+        // SAFETY: an 8-byte read into a local buffer; the fd is non-blocking.
+        let _ = unsafe { libc::read(fd, count.as_mut_ptr() as *mut libc::c_void, count.len()) };
+    }
+    Ok(n > 0)
+}
+
 /// The size of the object behind `fd`.
 pub(crate) fn fd_size(fd: BorrowedFd<'_>) -> io::Result<u64> {
     // SAFETY: stat is plain old data.

@@ -6,9 +6,10 @@
 //! deadlines, cancellation, at most 16 concurrent handlers, heartbeats, and a
 //! clean exit when the host epoch changes.
 
-use crate::client::{Client, Event};
+use crate::client::{Client, Event, Waker};
 use crate::error::RingError;
 use crate::module_protocol::*;
+use crate::notify::{Notifier, NotifyHandler, OverflowHandler};
 use crate::sys::monotonic_ns;
 use crate::wire::{F_CANCEL, F_MORE, F_REQUEST};
 use std::collections::HashMap;
@@ -16,15 +17,18 @@ use std::fmt;
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Concurrent handlers, and concurrent request assemblies, per process.
 pub const MODULE_MAX_IN_FLIGHT: usize = 16;
 const IDLE_MIN: Duration = Duration::from_millis(1);
 const IDLE_MAX: Duration = Duration::from_millis(10);
+/// Bound on a doorbell wait (D13): an idle process wakes only to heartbeat.
+/// Requests, finished handlers and shutdown wake it at once.
+const IDLE_WAIT: Duration = Duration::from_secs(5);
 
 /// Binds one event kind to the stage id carried in its AMOD envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,9 +88,20 @@ pub struct ModuleProcessConfig {
     pub stages: Vec<ModuleStage>,
     /// `None` answers every valid request with `CapabilityAbsent`.
     pub handler: Option<Handler>,
-    /// Idle poll ceiling, 1–10 ms. Zero keeps the 10 ms default.
+    /// Idle poll ceiling, 1–10 ms, used only against a host that grants no
+    /// doorbell (D13). Zero keeps the 10 ms default.
     pub max_idle_poll: Duration,
     pub after_attach: Option<AfterAttach>,
+    /// Notifications of the kinds this slot subscribes to (D14), called on
+    /// one thread in ring order with a copy of the payload.
+    pub notify: Option<NotifyHandler>,
+    /// The kind of each notification this slot missed. A subscriber that
+    /// keeps derived state re-reads it.
+    pub overflow: Option<OverflowHandler>,
+    /// Receives the attached client once [`run_module_process`] is serving,
+    /// so the module can publish on its own slot. A module that attaches
+    /// itself already holds its client.
+    pub started: Option<Box<dyn FnOnce(Arc<Client>) + Send>>,
 }
 
 impl fmt::Debug for ModuleProcessConfig {
@@ -99,13 +114,17 @@ impl fmt::Debug for ModuleProcessConfig {
             .field("stages", &self.stages)
             .field("handler", &self.handler.is_some())
             .field("max_idle_poll", &self.max_idle_poll)
+            .field("notify", &self.notify.is_some())
+            .field("overflow", &self.overflow.is_some())
             .finish()
     }
 }
 
 /// A cloneable stop signal, safe to set from a signal handler's thread.
+/// Setting it also rings the doorbell of every runtime serving under it
+/// (D13), so a sleeping loop stops at once.
 #[derive(Debug, Clone, Default)]
-pub struct Shutdown(Arc<AtomicBool>);
+pub struct Shutdown(Arc<AtomicBool>, Arc<Mutex<Vec<Waker>>>);
 
 impl Shutdown {
     pub fn new() -> Shutdown {
@@ -113,12 +132,18 @@ impl Shutdown {
     }
     pub fn trigger(&self) {
         self.0.store(true, Ordering::Release);
+        for w in self.1.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+            w.wake();
+        }
     }
     pub fn is_set(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
     pub(crate) fn flag(&self) -> &AtomicBool {
         &self.0
+    }
+    fn watch(&self, waker: Waker) {
+        self.1.lock().unwrap_or_else(|p| p.into_inner()).push(waker);
     }
 }
 
@@ -137,6 +162,15 @@ pub trait ModuleRing {
     fn epoch_changed(&self) -> bool;
     /// Largest payload one inline reply fragment may carry.
     fn max_inline_payload(&self) -> u32;
+    /// D13: sleep until the ring moves or `timeout` passes. Without a
+    /// doorbell, [`RingError::NoDoorbell`], and the runtime keeps polling.
+    fn wait(&self, _timeout: Duration) -> Result<bool, RingError> {
+        Err(RingError::NoDoorbell)
+    }
+    /// A handle that wakes [`ModuleRing::wait`] from another thread.
+    fn waker(&self) -> Option<Waker> {
+        None
+    }
 }
 
 impl ModuleRing for Client {
@@ -160,6 +194,12 @@ impl ModuleRing for Client {
     }
     fn max_inline_payload(&self) -> u32 {
         Client::max_inline_payload(self)
+    }
+    fn wait(&self, timeout: Duration) -> Result<bool, RingError> {
+        Client::wait(self, Some(timeout))
+    }
+    fn waker(&self) -> Option<Waker> {
+        Client::waker(self)
     }
 }
 
@@ -217,7 +257,11 @@ pub fn run_module_process(
             RingError::Config("post-attach hardening failed")
         })?;
     }
-    run_module_client(&config, &stages, &client, shutdown)
+    let client = Arc::new(client);
+    if let Some(started) = config.started.take() {
+        started(Arc::clone(&client));
+    }
+    run_module_client(&config, &stages, &*client, shutdown)
 }
 
 type CallKey = (u32, u64); // (requesting principal, correlation)
@@ -284,6 +328,17 @@ fn serve<B: ModuleRing>(
     rx: &mpsc::Receiver<Done>,
 ) -> Result<(), RingError> {
     let mut assemblies: HashMap<CallKey, Assembly> = HashMap::new();
+    // D13: a finished handler and shutdown ring the doorbell.
+    let waker = bus.waker();
+    if let Some(w) = &waker {
+        shutdown.watch(w.clone());
+        if shutdown.is_set() {
+            return Ok(());
+        }
+    }
+    // D14: notifications and overflow for this slot's subscriptions.
+    let notes = (config.notify.is_some() || config.overflow.is_some())
+        .then(|| Notifier::new(config.notify.clone(), config.overflow.clone()));
     let idle_max = if config.max_idle_poll.is_zero() {
         IDLE_MAX
     } else {
@@ -327,6 +382,12 @@ fn serve<B: ModuleRing>(
         let event = match bus.poll() {
             Ok(Some(ev)) => ev,
             Ok(None) => {
+                match bus.wait(IDLE_WAIT) {
+                    // The top of the loop drains finished handlers.
+                    Ok(_) => continue,
+                    Err(RingError::NoDoorbell) => {}
+                    Err(e) => return Err(e),
+                }
                 // A completed handler is local work: reply now rather than
                 // after the next idle interval.
                 match rx.recv_timeout(idle) {
@@ -345,6 +406,11 @@ fn serve<B: ModuleRing>(
             Err(e) => return Err(e),
         };
         idle = IDLE_MIN;
+        if let Some(n) = &notes {
+            if n.offer(&event) {
+                continue;
+            }
+        }
 
         let f = event.frame;
         let key = (f.principal_ref, f.correlation_id);
@@ -472,12 +538,16 @@ fn serve<B: ModuleRing>(
         };
         let name = config.module_name.clone();
         let kind = f.event_kind;
+        let wake = waker.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("{name}-stage"))
             .spawn(move || {
                 let body = assembly.body;
                 let (out, status) = run_handler(&handler, &invocation, &body, &name, kind);
                 report.send(out, status);
+                if let Some(w) = wake {
+                    w.wake();
+                }
             });
         if spawned.is_err() {
             jobs.remove(&key);
@@ -764,6 +834,9 @@ mod tests {
             }],
             handler,
             max_idle_poll: Duration::ZERO,
+            notify: None,
+            overflow: None,
+            started: None,
             after_attach: None,
         };
         let stages = validate(&config).unwrap();
@@ -777,6 +850,73 @@ mod tests {
         }
         shutdown.trigger();
         t.join().unwrap().unwrap();
+    }
+
+    fn notification(kind: u32, payload: &[u8]) -> Event {
+        Event {
+            frame: frame(crate::wire::F_NOTIFICATION, kind, 0, payload.len()),
+            payload: payload.to_vec(),
+        }
+    }
+
+    #[test]
+    fn notifications_and_overflow_reach_their_handlers_in_order() {
+        use crate::layout::{OVERFLOW_LEN, OVERFLOW_OFF_SHED_KIND};
+        use crate::wire::{F_CONTROL, F_NOTIFICATION, KIND_CAPABILITY_ABSENT, KIND_OVERFLOW};
+        let bus = Arc::new(FakeRing::default());
+        let mut overflow = vec![0u8; OVERFLOW_LEN];
+        overflow[OVERFLOW_OFF_SHED_KIND..][..4].copy_from_slice(&901u32.to_le_bytes());
+        {
+            let mut inbox = bus.inbox.lock().unwrap();
+            inbox.push_back(notification(900, b"first"));
+            // A control frame that is not an overflow is the runtime's.
+            inbox.push_back(Event {
+                frame: frame(F_NOTIFICATION | F_CONTROL, KIND_CAPABILITY_ABSENT, 0, 0),
+                payload: Vec::new(),
+            });
+            inbox.push_back(Event {
+                frame: frame(F_NOTIFICATION | F_CONTROL, KIND_OVERFLOW, 0, OVERFLOW_LEN),
+                payload: overflow,
+            });
+            inbox.push_back(notification(900, b"second"));
+        }
+        let notes = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let missed = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let (n, m) = (Arc::clone(&notes), Arc::clone(&missed));
+        let config = ModuleProcessConfig {
+            socket_path: "/unused".into(),
+            module_name: "test".into(),
+            principal_class: 1,
+            principal_ref: 7,
+            stages: vec![ModuleStage {
+                event_kind: KIND,
+                stage_id: STAGE,
+            }],
+            handler: None,
+            max_idle_poll: Duration::ZERO,
+            notify: Some(Arc::new(move |_, p: &[u8]| {
+                n.lock().unwrap().push(p.to_vec())
+            })),
+            overflow: Some(Arc::new(move |k| m.lock().unwrap().push(k))),
+            started: None,
+            after_attach: None,
+        };
+        let stages = validate(&config).unwrap();
+        let shutdown = Shutdown::new();
+        let (b, s) = (Arc::clone(&bus), shutdown.clone());
+        let t = std::thread::spawn(move || run_module_client(&config, &stages, &*b, &s));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while notes.lock().unwrap().len() < 2 || missed.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "timed out waiting for delivery");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        shutdown.trigger();
+        t.join().unwrap().unwrap();
+        assert_eq!(
+            *notes.lock().unwrap(),
+            vec![b"first".to_vec(), b"second".to_vec()]
+        );
+        assert_eq!(*missed.lock().unwrap(), vec![901]);
     }
 
     #[test]
@@ -926,6 +1066,9 @@ mod tests {
             }],
             handler: Some(echo()),
             max_idle_poll: Duration::ZERO,
+            notify: None,
+            overflow: None,
+            started: None,
             after_attach: None,
         };
         let stages = validate(&config).unwrap();
@@ -958,6 +1101,9 @@ mod tests {
             }],
             handler: None,
             max_idle_poll: Duration::ZERO,
+            notify: None,
+            overflow: None,
+            started: None,
             after_attach: None,
         };
         assert!(validate(&base()).is_ok());
@@ -983,6 +1129,9 @@ mod tests {
         assert!(
             validate(&ModuleProcessConfig {
                 max_idle_poll: Duration::from_millis(11),
+                notify: None,
+                overflow: None,
+                started: None,
                 ..base()
             })
             .is_err()

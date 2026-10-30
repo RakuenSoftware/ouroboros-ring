@@ -27,6 +27,8 @@ const KIND_ARENA_STATS: u32 = 1007;
 const KIND_ARENA_SERVE_ASK: u32 = 1008;
 const KIND_ARENA_SERVE: u32 = 1009;
 const KIND_ARENA_REPLY_ASK: u32 = 1010;
+const KIND_DOORBELL_ASK: u32 = 1011;
+const KIND_DOORBELL_RING: u32 = 1012;
 
 fn pattern_ok(payload: &[u8], len: u32) -> bool {
     payload.len() == len as usize
@@ -280,6 +282,42 @@ fn rust_client_against_c_host() {
     assert!(blocked, "the outbound ring never reported backpressure");
     assert!(accepted >= 1);
     while poll_for_opt(&c) {}
+
+    // 6b. D13: the C host granted a doorbell. The client sleeps on it and is
+    // woken by the C side's delayed publish, and its own publish wakes the
+    // host, which sleeps up to a second between pumps.
+    assert!(c.has_doorbell(), "the C host granted no doorbell");
+    assert!(
+        !c.wait(Some(Duration::from_millis(30))).unwrap(),
+        "an idle wait times out"
+    );
+    c.publish(KIND_DOORBELL_ASK, &[]).unwrap();
+    let began = Instant::now();
+    loop {
+        assert!(
+            c.wait(Some(Duration::from_secs(5))).unwrap(),
+            "the doorbell never rang"
+        );
+        if let Some(e) = c.poll().unwrap() {
+            if e.frame.event_kind == KIND_DOORBELL_RING {
+                break;
+            }
+        }
+    }
+    assert!(
+        began.elapsed() < Duration::from_secs(2),
+        "woken after {:?}",
+        began.elapsed()
+    );
+    std::thread::sleep(Duration::from_millis(1200)); // let the host fall asleep
+    let began = Instant::now();
+    c.publish(KIND_NOTIFY, b"after-idle").unwrap();
+    poll_for(&c, "ack after idle", |e| e.frame.event_kind == KIND_ACK);
+    assert!(
+        began.elapsed() < Duration::from_millis(500),
+        "ack after {:?}: the publish did not wake the sleeping host",
+        began.elapsed()
+    );
 
     // 7. Reaped-client recovery: drop this client, attach a fresh one into
     // the freed slot, and use it.

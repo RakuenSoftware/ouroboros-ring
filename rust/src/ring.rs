@@ -102,7 +102,6 @@ impl Ring {
     }
 
     /// Occupied slots (a snapshot).
-    #[cfg(test)]
     pub(crate) fn count(&self) -> u64 {
         self.index(OFF_HEAD)
             .load(Ordering::Acquire)

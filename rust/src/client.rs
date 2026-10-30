@@ -10,7 +10,7 @@ use crate::region::{self, Control, QueuePair, qpair_bytes};
 use crate::sys::{self, Mapping};
 use crate::wire::*;
 use std::collections::VecDeque;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -62,6 +62,30 @@ pub struct Client {
     dropped: AtomicU64,
     /// Arena refs owed back to the host but not yet sent (D12).
     releases: Mutex<VecDeque<(u32, u32)>>,
+    /// D13: the doorbell pair, when the host granted one.
+    doorbell: Option<Doorbell>,
+    wait_lock: Mutex<()>,
+}
+
+/// The two eventfds of a D13 grant: `host` is written to wake the host, `own`
+/// is read to sleep and written to interrupt that sleep.
+#[derive(Debug)]
+struct Doorbell {
+    host: OwnedFd,
+    own: Arc<OwnedFd>,
+}
+
+/// Wakes a client's [`Client::wait`] from any thread: a finished handler, a
+/// stop request. Cloneable and `Send`; it holds its own reference to the
+/// doorbell, so it stays valid however long it is kept.
+#[derive(Debug, Clone)]
+pub struct Waker(Arc<OwnedFd>);
+
+impl Waker {
+    /// Ring the doorbell.
+    pub fn wake(&self) {
+        sys::eventfd_ring(self.0.as_raw_fd());
+    }
 }
 
 /// Arena refs owed but unsent before the client stops taking arena events
@@ -89,10 +113,12 @@ impl Client {
         req[ATTACH_REQ_OFF_WIRE_MAX..][..2].copy_from_slice(&WIRE_VERSION.to_le_bytes());
         req[ATTACH_REQ_OFF_CLASS..][..4].copy_from_slice(&principal_class.to_le_bytes());
         req[ATTACH_REQ_OFF_REF..][..4].copy_from_slice(&principal_ref.to_le_bytes());
+        // D13: an older host reads only the first 16 bytes and grants none.
+        req[ATTACH_REQ_OFF_CAPABILITIES..][..4].copy_from_slice(&ATTACH_CAP_DOORBELL.to_le_bytes());
         sys::send_packet(sock, &req)?;
 
         let mut reply = [0u8; ATTACH_REPLY_BYTES + 1];
-        let (n, fds, truncated) = sys::recv_with_fds(sock, &mut reply, ATTACH_FDS)?;
+        let (n, mut fds, truncated) = sys::recv_with_fds(sock, &mut reply, ATTACH_FDS_DOORBELL)?;
         let r32 =
             |o: usize| u32::from_le_bytes([reply[o], reply[o + 1], reply[o + 2], reply[o + 3]]);
         let r64 = |o: usize| u64::from(r32(o)) | (u64::from(r32(o + 4)) << 32);
@@ -104,11 +130,32 @@ impl Client {
         if status != AttachStatus::Ok {
             return Err(RingError::Denied(status));
         }
-        if fds.len() != ATTACH_FDS {
+        // The grant's capabilities and descriptor count must agree. A host
+        // grants only what was asked for, so any other bit is an error.
+        let caps = r32(ATTACH_REPLY_OFF_CAPABILITIES);
+        let doorbell = caps & ATTACH_CAP_DOORBELL != 0;
+        if caps & !ATTACH_CAP_DOORBELL != 0
+            || fds.len()
+                != if doorbell {
+                    ATTACH_FDS_DOORBELL
+                } else {
+                    ATTACH_FDS
+                }
+        {
             return Err(RingError::Protocol(
-                "attach must carry exactly three descriptors",
+                "attach capabilities and descriptors disagree",
             ));
         }
+        let doorbell = if doorbell {
+            let own = fds.remove(ATTACH_FD_CLIENT_DOORBELL);
+            let host = fds.remove(ATTACH_FD_HOST_DOORBELL);
+            Some(Doorbell {
+                host,
+                own: Arc::new(own),
+            })
+        } else {
+            None
+        };
         let att = Attachment {
             handle: r32(ATTACH_REPLY_OFF_HANDLE),
             wire_version: r32(ATTACH_REPLY_OFF_WIRE),
@@ -172,6 +219,11 @@ impl Client {
                 "queue pair disagrees with the attach reply",
             ));
         }
+        if doorbell.is_some() && !control.has_doorbell() {
+            return Err(RingError::Protocol(
+                "a doorbell was granted but the control region keeps none",
+            ));
+        }
         Ok(Client {
             att,
             qp,
@@ -183,7 +235,67 @@ impl Client {
             poll_lock: Mutex::new(()),
             dropped: AtomicU64::new(0),
             releases: Mutex::new(VecDeque::new()),
+            doorbell,
+            wait_lock: Mutex::new(()),
         })
+    }
+
+    /// Whether the host granted a doorbell (D13).
+    pub fn has_doorbell(&self) -> bool {
+        self.doorbell.is_some()
+    }
+
+    /// A handle that wakes [`Client::wait`] from another thread, or `None`
+    /// without a doorbell.
+    pub fn waker(&self) -> Option<Waker> {
+        self.doorbell.as_ref().map(|d| Waker(Arc::clone(&d.own)))
+    }
+
+    /// Wake this client's own [`Client::wait`]. Does nothing without a
+    /// doorbell.
+    pub fn interrupt(&self) {
+        if let Some(d) = &self.doorbell {
+            sys::eventfd_ring(d.own.as_raw_fd());
+        }
+    }
+
+    /// Sleep until the inbound ring has an event, the host has made room in a
+    /// full outbound ring, the client is interrupted, or `timeout` passes
+    /// (`None` waits indefinitely). Reports whether it was woken. Without a
+    /// doorbell it returns [`RingError::NoDoorbell`] at once, and the caller
+    /// keeps its own backoff.
+    pub fn wait(&self, timeout: Option<Duration>) -> Result<bool, RingError> {
+        let Some(d) = &self.doorbell else {
+            return Err(RingError::NoDoorbell);
+        };
+        let _one = self.wait_lock.lock().unwrap_or_else(|p| p.into_inner());
+        self.qp.set_client_waiting(true);
+        // Pairs with the fence in the host's signal: either this re-check sees
+        // its commit, or its load sees the flag.
+        std::sync::atomic::fence(Ordering::SeqCst);
+        let woken = if self.qp.inbound.count() > 0 || self.epoch_changed() {
+            Ok(true)
+        } else {
+            let ms = timeout.map_or(-1, |t| {
+                i32::try_from(t.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX)
+            });
+            sys::eventfd_wait(d.own.as_raw_fd(), ms).map_err(RingError::from)
+        };
+        self.qp.set_client_waiting(false);
+        woken
+    }
+
+    /// Wake the host if it is asleep (D13). Called after committing into the
+    /// outbound ring, and after consuming from the inbound ring, which can
+    /// free the room a producer held by the host is waiting for.
+    fn signal_host(&self) {
+        if let Some(d) = &self.doorbell {
+            // Pairs with the fence in ouro_host_wait (see Client::wait).
+            std::sync::atomic::fence(Ordering::SeqCst);
+            if self.control.host_waiting() {
+                sys::eventfd_ring(d.host.as_raw_fd());
+            }
+        }
     }
 
     /// Connect to a daemon's ring socket and attach. A refused connection is
@@ -310,6 +422,7 @@ impl Client {
         frame.encode(&mut header).expect("validated frame encodes");
         let written = self.qp.outbound.produce(&[&header, payload]);
         if written {
+            self.signal_host();
             Ok(())
         } else {
             Err(RingError::WouldBlock)
@@ -448,6 +561,7 @@ impl Client {
                     .is_ok()
             }) else {
                 self.qp.inbound.advance();
+                self.signal_host();
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
             };
@@ -488,12 +602,14 @@ impl Client {
                     .unwrap_or_else(|p| p.into_inner())
                     .push_back((lease, frame.generation));
                 self.qp.inbound.advance();
+                self.signal_host();
                 if let Err(RingError::Epoch) = self.flush_releases() {
                     return Err(RingError::Epoch);
                 }
                 return Ok(Some(Event { frame, payload }));
             }
             self.qp.inbound.advance();
+            self.signal_host();
             return Ok(Some(Event { frame, payload }));
         }
     }
