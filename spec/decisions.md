@@ -720,7 +720,9 @@ v0 polling.
 **What this changes for each implementation.** `ouro_client_wait`, `Client.Wait` and
 `Client::wait` sleep until something is readable or a timeout passes, and return at once with "no
 doorbell" against an older host, so callers keep their own backoff only there. The host gains
-`ouro_host_wait`, and the runtime's accept loop blocks in `poll(2)` instead of retrying every 10ms.
+`ouro_host_wait`, split into `ouro_host_wait_begin` and `ouro_host_wait_end` for an embedding whose
+pump shares a lock with attach, and the runtime's accept loop blocks in `poll(2)` instead of
+retrying every 10ms.
 The module runtimes and callers in all three languages wait on the doorbell. This removes the C
 runtime's unconditional 1ms sleep and the Go `MaxIdlePollInterval` trade-off. Heartbeats keep their
 intervals; on an idle deployment they are the only periodic activity left.

@@ -318,6 +318,17 @@ uint32_t ouro_host_pump(ouro_host_t *h);
  * in-process client would. */
 int ouro_host_wait(ouro_host_t *h, int timeout_ms);
 
+/* The same wait in two halves, for an embedding that guards the host with a
+ * lock other threads take (attach, reap), as the runtime listener does.
+ * ouro_host_wait_begin re-checks the rings and so must be called under that
+ * lock; it returns 1 when work is already waiting, 0 when the caller should
+ * sleep, and -1 without a doorbell. The caller then releases the lock, waits
+ * for ouro_host_doorbell_fd to be readable, and calls ouro_host_wait_end,
+ * which touches no slot and needs no lock. A begin that returns 1 or -1 needs
+ * no end. */
+int ouro_host_wait_begin(ouro_host_t *h);
+void ouro_host_wait_end(ouro_host_t *h);
+
 /* Wake a thread in ouro_host_wait, for work the rings do not show (shutdown,
  * a timer). Safe from any thread. */
 void ouro_host_wake(ouro_host_t *h);

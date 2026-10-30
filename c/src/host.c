@@ -78,7 +78,7 @@ static int host_has_work(const ouro_host_t *h)
    return 0;
 }
 
-int ouro_host_wait(ouro_host_t *h, int timeout_ms)
+int ouro_host_wait_begin(ouro_host_t *h)
 {
    if (!h || !h->slots || !h->control || h->doorbell_fd < 0)
       return -1;
@@ -89,14 +89,28 @@ int ouro_host_wait(ouro_host_t *h, int timeout_ms)
       atomic_store_explicit(&h->control->host_waiting, 0, memory_order_relaxed);
       return 1;
    }
+   return 0;
+}
+
+void ouro_host_wait_end(ouro_host_t *h)
+{
+   if (!h || !h->control || h->doorbell_fd < 0)
+      return;
+   doorbell_drain(h->doorbell_fd);
+   atomic_store_explicit(&h->control->host_waiting, 0, memory_order_relaxed);
+}
+
+int ouro_host_wait(ouro_host_t *h, int timeout_ms)
+{
+   int begun = ouro_host_wait_begin(h);
+   if (begun != 0)
+      return begun;
    struct pollfd p = {.fd = h->doorbell_fd, .events = POLLIN};
    int rc;
    /* EINTR ends the wait as a timeout: a signal-driven stop must not wait
     * out the whole timeout. */
    rc = poll(&p, 1, timeout_ms);
-   if (rc > 0)
-      doorbell_drain(h->doorbell_fd);
-   atomic_store_explicit(&h->control->host_waiting, 0, memory_order_relaxed);
+   ouro_host_wait_end(h);
    return rc > 0 ? 1 : 0;
 }
 

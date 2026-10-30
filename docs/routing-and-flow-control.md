@@ -77,7 +77,10 @@ sequenceDiagram
 
 The waits are `ouro_host_wait` for the host and `ouro_client_wait`,
 `Client.Wait` (Go) and `Client::wait` (Rust) for a client, each with a timeout
-for maintenance such as heartbeats. `ouro_client_interrupt` and its Go and Rust
+for maintenance such as heartbeats. An embedding that guards the host with a
+lock other threads take, as the runtime listener does, splits the host's wait:
+`ouro_host_wait_begin` under the lock, a wait on `ouro_host_doorbell_fd`
+without it, then `ouro_host_wait_end`. `ouro_client_interrupt` and its Go and Rust
 counterparts wake a client's own wait from another thread. The module runtimes
 and callers in all three languages use them, so an idle module process wakes
 only to heartbeat.

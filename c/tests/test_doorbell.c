@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -282,6 +283,35 @@ static void test_host_wait(void)
    printf("  host wait: sleeps when idle, wakes for a publish or a wake call\n");
 }
 
+static void test_split_host_wait(void)
+{
+   ouro_host_config_t cfg;
+   host_config(&cfg);
+   ouro_host_t h;
+   must(ouro_host_create(&h, &cfg, NULL, NULL) == OURO_HOST_OK, "host");
+   ouro_client_t pub;
+   must(ouro_host_attach_local(&h, &pub, 0) == OURO_CLIENT_OK, "publisher attached");
+
+   /* An embedding that guards the host with a lock begins under it, sleeps
+    * without it, and ends. */
+   must(ouro_host_wait_begin(&h) == 0, "an idle host is told to sleep");
+   must(atomic_load(&h.control->host_waiting) == 1, "and says it is asleep");
+   must(ouro_client_publish(&pub, 900, "ping", 4) == OURO_CLIENT_OK, "publish");
+   struct pollfd p = {.fd = ouro_host_doorbell_fd(&h), .events = POLLIN};
+   must(poll(&p, 1, 2000) == 1, "the publish rang the doorbell the caller sleeps on");
+   ouro_host_wait_end(&h);
+   must(atomic_load(&h.control->host_waiting) == 0, "end says the host is awake");
+   p.revents = 0;
+   must(poll(&p, 1, 0) == 0, "and resets the doorbell");
+   must(ouro_host_wait_begin(&h) == 1, "work already queued says so at begin");
+   must(atomic_load(&h.control->host_waiting) == 0, "without leaving the flag set");
+   (void)ouro_host_pump(&h);
+
+   ouro_client_detach(&pub);
+   ouro_host_destroy(&h);
+   printf("  split wait: begin under a lock, sleep on the fd, end\n");
+}
+
 static void test_blocked_producer(void)
 {
    ouro_host_config_t cfg;
@@ -347,6 +377,7 @@ int main(void)
    test_host_without_doorbell();
    test_client_wait();
    test_host_wait();
+   test_split_host_wait();
    test_blocked_producer();
    test_no_leak();
    printf("test_doorbell: OK\n");
