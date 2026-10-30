@@ -168,6 +168,28 @@ func (m *ModuleCaller) send(eventKind, stageID uint32, traceID, correlation, dea
 	return nil
 }
 
+// waitForReply sleeps on the doorbell (D13) until the reply arrives, bounded
+// by the call's expiry and, when ctx can be cancelled, by a short slice so the
+// cancellation is noticed. It reports false when there is no doorbell and the
+// caller should fall back to its poll interval.
+func (m *ModuleCaller) waitForReply(ctx context.Context, expiry time.Time) bool {
+	bell, ok := m.client.(doorbellRing)
+	if !ok {
+		return false
+	}
+	timeout := moduleIdleWait
+	if ctx.Done() != nil {
+		timeout = 50 * time.Millisecond
+	}
+	if !expiry.IsZero() {
+		if left := time.Until(expiry); left < timeout {
+			timeout = max(left, 0)
+		}
+	}
+	_, err := bell.Wait(timeout)
+	return err == nil
+}
+
 // awaitReply consumes the ring until this call's correlated result arrives.
 //
 // Events for other correlations are skipped rather than buffered: a caller owns
@@ -186,6 +208,9 @@ func (m *ModuleCaller) awaitReply(ctx context.Context, eventKind uint32, correla
 			}
 			if !expiry.IsZero() && time.Now().After(expiry) {
 				return nil, ErrModuleCallDeadline
+			}
+			if m.waitForReply(ctx, expiry) {
+				continue
 			}
 			time.Sleep(m.pollInterval)
 			continue

@@ -20,6 +20,9 @@ const (
 	// Well inside the host's 30s stale window, so a client stays admitted
 	// across an idle stretch without heartbeating hot.
 	clientHeartbeatInterval = 5 * time.Second
+	// moduleIdleWait bounds a doorbell wait (D13): an idle process wakes only
+	// to heartbeat. Requests, finished handlers and shutdown wake it at once.
+	moduleIdleWait = clientHeartbeatInterval
 )
 
 func nextModuleIdle(delay, maximum time.Duration) time.Duration {
@@ -100,11 +103,21 @@ type ModuleProcessConfig struct {
 	PrincipalRef   uint32
 	Stages         []ModuleStage
 	Handler        ModuleHandler
-	// MaxIdlePollInterval caps this Go consumer's scheduled idle backoff.
-	// Zero preserves the 10ms idle ceiling. Latency-sensitive modules may choose
-	// a ceiling between 1ms and 10ms, trading bounded idle wakeups for latency.
-	// This does not alter the shared-memory protocol or the C host's polling.
+	// MaxIdlePollInterval caps the idle backoff used only against a host that
+	// grants no doorbell (D13). Zero means 10ms. With a doorbell the process
+	// sleeps until woken, so there is no latency to trade.
 	MaxIdlePollInterval time.Duration
+	// Notify receives notifications of the kinds this slot subscribes to, with
+	// a copy of the payload (D14). Calls are made on one goroutine, in ring
+	// order; a slow Notify delays the next notification, never a request.
+	Notify func(kind uint32, payload []byte)
+	// Overflow is told the kind of a notification this slot missed, by the
+	// host shedding it or by Notify falling too far behind. A subscriber that
+	// keeps derived state re-reads it.
+	Overflow func(kind uint32)
+	// Started receives a Publisher for this process's slot once it is
+	// attached and serving.
+	Started func(Publisher)
 	// AfterAttach hardens process state that would otherwise prevent the host
 	// from authenticating this executable through its peer credentials.
 	AfterAttach func() error
@@ -366,6 +379,30 @@ func runModuleClient(ctx context.Context, config ModuleProcessConfig, stages map
 	idleTimer := time.NewTimer(idleDelay)
 	defer idleTimer.Stop()
 
+	// D13: sleep on the doorbell when the host granted one. A finished handler
+	// and shutdown interrupt the wait; nothing else needs a timer.
+	bell, _ := client.(doorbellRing)
+	if bell != nil {
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-ctx.Done():
+				bell.Interrupt()
+			case <-stop:
+			}
+		}()
+	}
+	// D14: notifications and overflow for this slot's subscriptions.
+	var notes *notifier
+	if config.Notify != nil || config.Overflow != nil {
+		notes = newNotifier(config.Notify, config.Overflow)
+		defer notes.close()
+	}
+	if config.Started != nil {
+		config.Started(ringPublisher{ring: client})
+	}
+
 	for {
 		for {
 			select {
@@ -407,6 +444,13 @@ func runModuleClient(ctx context.Context, config ModuleProcessConfig, stages map
 			return err
 		}
 		if !ok {
+			if bell != nil {
+				if _, err := bell.Wait(moduleIdleWait); err == nil {
+					continue // the top of the loop drains finished handlers
+				} else if !errors.Is(err, ErrNoDoorbell) {
+					return err
+				}
+			}
 			// A completed handler is local work: publish its reply immediately
 			// instead of waiting for the next shared-ring polling interval.
 			idleTimer.Reset(idleDelay)
@@ -424,6 +468,9 @@ func runModuleClient(ctx context.Context, config ModuleProcessConfig, stages map
 			continue
 		}
 		idleDelay = moduleIdle
+		if notes != nil && notes.offer(event) {
+			continue
+		}
 		correlation := event.Frame.CorrelationID
 		key := moduleCallKey{principalRef: event.Frame.PrincipalRef, correlationID: correlation}
 		if event.Frame.HdrFlags&FCancel != 0 {
@@ -510,6 +557,11 @@ func runModuleClient(ctx context.Context, config ModuleProcessConfig, stages map
 				cancelled: cancelled}}
 		jobs[key] = work
 		requestBody := append([]byte(nil), assembly.body...)
-		go runHandler(done, work, config.Handler, requestBody)
+		go func() {
+			runHandler(done, work, config.Handler, requestBody)
+			if bell != nil {
+				bell.Interrupt()
+			}
+		}()
 	}
 }

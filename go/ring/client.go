@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -14,7 +15,8 @@ import (
 const (
 	attachReqMagic   uint32 = 0x51524241 // "ABRQ"
 	attachReplyMagic uint32 = 0x50524241 // "ABRP"
-	attachReqBytes          = 16
+	attachReqBytes          = 20
+	attachReqV0Bytes        = 16 // D13: what an older host reads of the request
 	attachReplyBytes        = 48
 
 	// Field offsets, frozen by vectors/layout_vectors.tsv.
@@ -23,6 +25,7 @@ const (
 	attachReqOffWireMax        = 6
 	attachReqOffPrincipalClass = 8
 	attachReqOffPrincipalRef   = 12
+	attachReqOffCapabilities   = 16
 	attachReplyOffMagic        = 0
 	attachReplyOffStatus       = 4
 	attachReplyOffHandle       = 8
@@ -30,15 +33,22 @@ const (
 	attachReplyOffSlot         = 16
 	attachReplyOffInline       = 20
 	attachReplyOffQueueCap     = 24
-	attachReplyOffReserved     = 28
+	attachReplyOffCapabilities = 28 // D13, formerly reserved
 	attachReplyOffArena        = 32
 	attachReplyOffEpoch        = 40
 
-	// A successful attach carries exactly these descriptors, in this order.
-	attachDescriptors = 3
-	attachFdControl   = 0
-	attachFdArena     = 1
-	attachFdQpair     = 2
+	// A successful attach carries exactly these descriptors, in this order. A
+	// doorbell grant (D13) adds the host doorbell and the client's own.
+	attachDescriptors         = 3
+	attachDescriptorsDoorbell = 5
+	attachFdControl           = 0
+	attachFdArena             = 1
+	attachFdQpair             = 2
+	attachFdHostDoorbell      = 3
+	attachFdClientDoorbell    = 4
+
+	// attachCapDoorbell asks for, and grants, a doorbell pair (D13).
+	attachCapDoorbell uint32 = 0x1
 )
 
 // AttachStatus mirrors ouro_attach_status_t.
@@ -63,6 +73,9 @@ var (
 	ErrWouldBlock = errors.New("ring: would block")
 	// ErrPayload is returned when a payload does not fit the inline budget.
 	ErrPayload = errors.New("ring: payload too large for inline budget")
+	// ErrNoDoorbell is returned by Wait when the host granted no doorbell
+	// (it predates D13); the caller keeps its own backoff.
+	ErrNoDoorbell = errors.New("ring: host granted no doorbell")
 )
 
 // String names the refusal, so a log line says which of the four it was.
@@ -118,6 +131,12 @@ type Client struct {
 
 	// emitMu serialises writers to the single-producer outbound ring. See emit.
 	emitMu sync.Mutex
+
+	// D13: the doorbell pair, valid when haveDoorbell. hostDoorbell is written
+	// to wake the host; doorbell is read to sleep and written to interrupt.
+	haveDoorbell bool
+	hostDoorbell int
+	doorbell     int
 }
 
 // leaseRef names an arena consumer ref the client owes back to the host.
@@ -164,12 +183,14 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 	binary.LittleEndian.PutUint16(req[attachReqOffWireMax:], WireVersion)
 	binary.LittleEndian.PutUint32(req[attachReqOffPrincipalClass:], principalClass)
 	binary.LittleEndian.PutUint32(req[attachReqOffPrincipalRef:], principalRef)
+	// D13: an older host reads only the first 16 bytes and grants no doorbell.
+	binary.LittleEndian.PutUint32(req[attachReqOffCapabilities:], attachCapDoorbell)
 	if err := unix.Sendmsg(sock, req[:], nil, nil, 0); err != nil {
 		return nil, err
 	}
 
 	replyBuf := make([]byte, attachReplyBytes)
-	oob := make([]byte, unix.CmsgSpace(attachDescriptors*4))
+	oob := make([]byte, unix.CmsgSpace(attachDescriptorsDoorbell*4))
 	n, oobn, _, _, err := unix.Recvmsg(sock, replyBuf, oob, unix.MSG_CMSG_CLOEXEC)
 	if err != nil {
 		return nil, err
@@ -189,7 +210,15 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 		closeAll()
 		return &Client{Status: status}, fmt.Errorf("%w: %s", ErrDenied, status)
 	}
-	if len(fds) != attachDescriptors {
+	// The grant's capabilities and descriptor count must agree. A host grants
+	// only what was asked for, so any other bit is a protocol error.
+	caps := binary.LittleEndian.Uint32(replyBuf[attachReplyOffCapabilities:])
+	doorbell := caps&attachCapDoorbell != 0
+	wantFds := attachDescriptors
+	if doorbell {
+		wantFds = attachDescriptorsDoorbell
+	}
+	if caps&^attachCapDoorbell != 0 || len(fds) != wantFds {
 		closeAll()
 		return nil, ErrProtocol
 	}
@@ -259,7 +288,15 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 		closeAll()
 		return nil, err
 	}
-	closeAll() // the mappings hold their own references
+	// The mappings hold their own references; the doorbells stay open.
+	for _, fd := range fds[:attachDescriptors] {
+		unix.Close(fd)
+	}
+	c.hostDoorbell, c.doorbell = -1, -1
+	if doorbell {
+		c.haveDoorbell = true
+		c.hostDoorbell, c.doorbell = fds[attachFdHostDoorbell], fds[attachFdClientDoorbell]
+	}
 
 	c.ctlMem, c.arena, c.qpMem = ctlMem, arena, qpMem
 	if c.control, err = AttachControl(ctlMem); err != nil {
@@ -283,6 +320,10 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 		c.qp.Outbound.SlotSize() != c.slotSize || c.qp.Outbound.Capacity() != c.queueCapacity {
 		c.Detach()
 		return nil, ErrRegion
+	}
+	if c.haveDoorbell && c.control.flags()&ctlFlagDoorbell == 0 {
+		c.Detach()
+		return nil, ErrProtocol
 	}
 	c.leaseView = c.control.leaseView()
 	return c, nil
@@ -332,7 +373,86 @@ func (c *Client) Detach() {
 		unix.Munmap(c.qpMem)
 		c.qpMem = nil
 	}
+	if c.haveDoorbell {
+		unix.Close(c.hostDoorbell)
+		unix.Close(c.doorbell)
+		c.haveDoorbell = false
+		c.hostDoorbell, c.doorbell = -1, -1
+	}
 }
+
+// signalHost wakes the host if it is asleep (D13). It follows a commit into
+// the outbound ring, or a consume from the inbound ring, which can free the
+// room a producer held by the host is waiting for.
+func (c *Client) signalHost() {
+	if c.haveDoorbell && c.control.hostWaiting() {
+		ringDoorbell(c.hostDoorbell)
+	}
+}
+
+func ringDoorbell(fd int) {
+	var one [8]byte
+	binary.LittleEndian.PutUint64(one[:], 1)
+	for {
+		if _, err := unix.Write(fd, one[:]); err != unix.EINTR {
+			return // EAGAIN: already signalled, the sleeper will wake
+		}
+	}
+}
+
+// Wait sleeps until the inbound ring has an event, the host has made room in a
+// full outbound ring, Interrupt is called, or timeout passes (negative waits
+// indefinitely). It reports whether it was woken. Without a doorbell it
+// returns ErrNoDoorbell at once, and the caller keeps its own backoff. One
+// goroutine at a time, like Poll.
+func (c *Client) Wait(timeout time.Duration) (bool, error) {
+	if c == nil || c.qp == nil {
+		return false, ErrProtocol
+	}
+	if !c.haveDoorbell {
+		return false, ErrNoDoorbell
+	}
+	c.qp.setClientWaiting(true)
+	defer c.qp.setClientWaiting(false)
+	// The slot the last Poll handed out stays counted until the next Poll
+	// releases it, so it is not a new event.
+	var seen uint64
+	if c.pendingRead {
+		seen = 1
+	}
+	if c.qp.Inbound.Count() > seen || c.EpochChanged() {
+		return true, nil
+	}
+	ms := -1
+	if timeout >= 0 {
+		ms = int((timeout + time.Millisecond - 1) / time.Millisecond)
+	}
+	fds := []unix.PollFd{{Fd: int32(c.doorbell), Events: unix.POLLIN}}
+	n, err := unix.Poll(fds, ms)
+	if err == unix.EINTR {
+		return false, nil // a signal ends the wait like a timeout
+	}
+	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		var count [8]byte
+		_, _ = unix.Read(c.doorbell, count[:])
+	}
+	return n > 0, nil
+}
+
+// Interrupt wakes this client's own Wait from another goroutine: a finished
+// handler, a caller with something to send, shutdown. Without a doorbell it
+// does nothing.
+func (c *Client) Interrupt() {
+	if c != nil && c.haveDoorbell {
+		ringDoorbell(c.doorbell)
+	}
+}
+
+// HasDoorbell reports whether the host granted a doorbell (D13).
+func (c *Client) HasDoorbell() bool { return c != nil && c.haveDoorbell }
 
 // EpochChanged reports whether the host has restarted since attach.
 func (c *Client) EpochChanged() bool {
@@ -392,6 +512,7 @@ func (c *Client) emit(flags uint16, kind uint32, corr uint64, payload []byte) er
 		copy(slot[HdrLen:], payload)
 	}
 	c.qp.Outbound.ProduceCommit()
+	c.signalHost()
 	return nil
 }
 
@@ -462,6 +583,7 @@ func (c *Client) Poll() (Event, bool, error) {
 	if c.pendingRead {
 		c.qp.Inbound.ConsumeCommit()
 		c.pendingRead = false
+		c.signalHost()
 	}
 	// The arena span handed out by the previous Poll is no longer the caller's
 	// to read: return its ref (D12).
@@ -481,6 +603,7 @@ func (c *Client) Poll() (Event, bool, error) {
 	var ev Event
 	if Decode(slot, &ev.Frame) != OK {
 		c.qp.Inbound.ConsumeCommit()
+		c.signalHost()
 		return Event{}, false, nil
 	}
 	if ev.Frame.HdrFlags&FInline != 0 && ev.Frame.PayloadLen > 0 &&

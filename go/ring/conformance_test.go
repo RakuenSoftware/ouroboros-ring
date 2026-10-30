@@ -271,6 +271,49 @@ func TestCrossLanguageConformance(t *testing.T) {
 	}
 	t.Log("arena requests and replies served and read across the process boundary ok")
 
+	// D13: the C host grants this client a doorbell; the client sleeps on it
+	// and is woken by the C side's delayed publish, and its own publish wakes
+	// the host, which sleeps up to a second between pumps.
+	if !c.HasDoorbell() {
+		t.Fatal("the C host granted no doorbell")
+	}
+	if woke, err := c.Wait(30 * time.Millisecond); err != nil || woke {
+		t.Fatalf("idle wait = %v, %v; want a timeout", woke, err)
+	}
+	if err := c.Publish(KIND_DOORBELL_ASK, nil); err != nil {
+		t.Fatalf("publish doorbell ask: %v", err)
+	}
+	began := time.Now()
+	for {
+		woke, err := c.Wait(5 * time.Second)
+		if err != nil {
+			t.Fatalf("wait: %v", err)
+		}
+		if !woke {
+			t.Fatal("the doorbell never rang")
+		}
+		ev, ok, err := c.Poll()
+		if err != nil {
+			t.Fatalf("poll: %v", err)
+		}
+		if ok && ev.Frame.EventKind == KIND_DOORBELL_RING {
+			break
+		}
+	}
+	if took := time.Since(began); took > 2*time.Second {
+		t.Fatalf("woken after %v; the doorbell did not ring promptly", took)
+	}
+	time.Sleep(1200 * time.Millisecond) // let the host fall asleep
+	began = time.Now()
+	if err := c.Publish(KIND_NOTIFY, payload); err != nil {
+		t.Fatalf("publish notify: %v", err)
+	}
+	pollFor(func(ev Event) bool { return ev.Frame.EventKind == KIND_ACK }, "ack after idle")
+	if took := time.Since(began); took > 500*time.Millisecond {
+		t.Fatalf("ack after %v: the publish did not wake the sleeping host", took)
+	}
+	t.Log("doorbells: client woken by the host, host woken by the client ok")
+
 	// 5. Reaped-client recovery: this Go client detaches; the host reaps it and
 	// frees its slot. A fresh Go client then attaches into that slot and works —
 	// proving recovery across the language boundary.
@@ -345,4 +388,6 @@ const (
 	KIND_ARENA_SERVE_ASK uint32 = 1008
 	KIND_ARENA_SERVE     uint32 = 1009
 	KIND_ARENA_REPLY_ASK uint32 = 1010
+	KIND_DOORBELL_ASK    uint32 = 1011
+	KIND_DOORBELL_RING   uint32 = 1012
 )

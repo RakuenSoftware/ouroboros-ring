@@ -32,6 +32,13 @@ type ConcurrentModuleCaller struct {
 	closeOnce    sync.Once
 	calls        sync.WaitGroup
 	pollInterval time.Duration
+
+	// D14: notification and overflow handlers, registered before or after the
+	// first call. notes is created on first registration.
+	notesMu  sync.Mutex
+	notes    *notifier
+	handlers map[uint32]func([]byte)
+	overflow func(kind uint32)
 }
 
 type callerReply struct {
@@ -63,6 +70,9 @@ func newConcurrentModuleCaller(ctx context.Context, client callerRing) *Concurre
 
 func (c *ConcurrentModuleCaller) finish(err error) {
 	c.closeOnce.Do(func() {
+		if bell, ok := c.client.(doorbellRing); ok {
+			bell.Interrupt() // the poll goroutine may be asleep on the doorbell
+		}
 		c.mu.Lock()
 		c.isClosed = true
 		close(c.closed)
@@ -77,9 +87,27 @@ func (c *ConcurrentModuleCaller) finish(err error) {
 
 func (c *ConcurrentModuleCaller) poll(ctx context.Context) {
 	defer close(c.stopped)
+	defer func() {
+		c.notesMu.Lock()
+		notes := c.notes
+		c.notesMu.Unlock()
+		notes.close()
+	}()
 	idleDelay := c.pollInterval
 	timer := time.NewTimer(idleDelay)
 	defer timer.Stop()
+	// D13: sleep on the doorbell when the host granted one. Replies wake it;
+	// so do cancellation and close, through Interrupt.
+	bell, _ := c.client.(doorbellRing)
+	if bell != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				bell.Interrupt()
+			case <-c.closed:
+			}
+		}()
+	}
 	for {
 		// Stop when asked, not only when the context ends or a read fails.
 		// Without this the loop cannot be shut down at all, so a caller that
@@ -99,6 +127,14 @@ func (c *ConcurrentModuleCaller) poll(ctx context.Context) {
 			return
 		}
 		if !ok {
+			if bell != nil {
+				if _, err := bell.Wait(moduleIdleWait); err == nil {
+					continue
+				} else if !errors.Is(err, ErrNoDoorbell) {
+					c.finish(err)
+					return
+				}
+			}
 			c.mu.Lock()
 			active := len(c.pending) != 0
 			c.mu.Unlock()
@@ -122,6 +158,18 @@ func (c *ConcurrentModuleCaller) poll(ctx context.Context) {
 			continue
 		}
 		idleDelay = c.pollInterval
+		// Data notifications and overflow go to the notifier. Other control
+		// frames (capability_absent, capability_denied) answer a pending call.
+		if f := event.Frame; f.HdrFlags&FNotification != 0 &&
+			(f.HdrFlags&FControl == 0 || f.EventKind == KindOverflow) {
+			c.notesMu.Lock()
+			notes := c.notes
+			c.notesMu.Unlock()
+			if notes != nil {
+				notes.offer(event)
+			}
+			continue
+		}
 		id := event.Frame.CorrelationID
 		c.mu.Lock()
 		pending, exists := c.pending[id]
@@ -175,6 +223,69 @@ func (c *ConcurrentModuleCaller) poll(ctx context.Context) {
 		}
 		c.deliver(id, callerReply{body: a.body})
 	}
+}
+
+// OnNotification has fn receive every notification of kind this slot
+// subscribes to, with a copy of its payload (D14). Handlers run on one
+// goroutine, in ring order. Registering again for a kind replaces the handler.
+func (c *ConcurrentModuleCaller) OnNotification(kind uint32, fn func(payload []byte)) {
+	if c == nil {
+		return
+	}
+	c.notesMu.Lock()
+	defer c.notesMu.Unlock()
+	if c.handlers == nil {
+		c.handlers = map[uint32]func([]byte){}
+	}
+	c.handlers[kind] = fn
+	c.ensureNotesLocked()
+}
+
+// OnOverflow has fn told the kind of each notification this slot missed. A
+// subscriber that keeps derived state re-reads it.
+func (c *ConcurrentModuleCaller) OnOverflow(fn func(kind uint32)) {
+	if c == nil {
+		return
+	}
+	c.notesMu.Lock()
+	defer c.notesMu.Unlock()
+	c.overflow = fn
+	c.ensureNotesLocked()
+}
+
+func (c *ConcurrentModuleCaller) ensureNotesLocked() {
+	if c.notes != nil {
+		return
+	}
+	c.notes = newNotifier(func(kind uint32, payload []byte) {
+		c.notesMu.Lock()
+		fn := c.handlers[kind]
+		c.notesMu.Unlock()
+		if fn != nil {
+			fn(payload)
+		}
+	}, func(kind uint32) {
+		c.notesMu.Lock()
+		fn := c.overflow
+		c.notesMu.Unlock()
+		if fn != nil {
+			fn(kind)
+		}
+	})
+}
+
+// Publish sends a notification on this caller's slot, under its grants. A full
+// outbound ring is retried until ctx ends.
+func (c *ConcurrentModuleCaller) Publish(ctx context.Context, kind uint32, payload []byte) error {
+	if c == nil || c.client == nil {
+		return ErrModuleConfig
+	}
+	select {
+	case <-c.closed:
+		return ErrModuleRuntime
+	default:
+	}
+	return ringPublisher{ring: c.client}.Publish(ctx, kind, payload)
 }
 
 func (c *ConcurrentModuleCaller) deliver(id uint64, reply callerReply) {

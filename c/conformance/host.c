@@ -22,7 +22,12 @@
  *     REQUEST of KIND_ARENA_SERVE, which the external client serves; its inline
  *     verdict on the bytes is forwarded as the ask's reply;
  *   - KIND_ARENA_REPLY_ASK: the C side answers with an arena-placed REPLY. The
- *     host routes all three arena patterns, so all three are proven here.
+ *     host routes all three arena patterns, so all three are proven here;
+ *   - KIND_DOORBELL_ASK (D13): the internal C client publishes KIND_DOORBELL_RING
+ *     50ms later, while the external client sleeps on its doorbell, so the
+ *     client's wakeup is observable. The host itself sleeps on its doorbell for
+ *     up to a second between pumps, so any prompt answer to an external publish
+ *     proves the external client rang it.
  *
  * Usage: ouroboros-ring-conformance-host <socket-path> [timeout-ms]
  * It listens, accepts exactly one external client, pumps and services until the
@@ -57,6 +62,10 @@
 #define KIND_ARENA_SERVE_ASK 1008 /* external asks: the C side sends it an arena REQUEST */
 #define KIND_ARENA_SERVE     1009 /* served by the external client */
 #define KIND_ARENA_REPLY_ASK 1010 /* external asks: the C side answers with an arena REPLY */
+#define KIND_DOORBELL_ASK    1011 /* external asks: the C side rings back 50ms later (D13) */
+#define KIND_DOORBELL_RING   1012
+#define DOORBELL_DELAY_MS    50
+#define HOST_IDLE_WAIT_MS    1000
 
 /* Lease and fill `len` arena bytes with the known pattern, as the internal
  * co-located producer. Returns 0 on success. */
@@ -181,6 +190,7 @@ int main(int argc, char **argv)
       return 1;
    }
    ouro_host_subscribe(&h, cc.reply.handle_id, KIND_NOTIFY);
+   ouro_host_subscribe(&h, cc.reply.handle_id, KIND_DOORBELL_ASK);
    ouro_host_serve_kind(&h, cc.reply.handle_id, KIND_ECHO);
    ouro_host_serve_kind(&h, cc.reply.handle_id, KIND_ARENA_ASK);
    ouro_host_serve_kind(&h, cc.reply.handle_id, KIND_ARENA_STATS);
@@ -235,9 +245,11 @@ int main(int argc, char **argv)
       ouro_host_subscribe(&h, (uint32_t)ext, KIND_ACK);
       ouro_host_subscribe(&h, (uint32_t)ext, KIND_CANCEL_ACK);
       ouro_host_subscribe(&h, (uint32_t)ext, KIND_ARENA_DATA);
+      ouro_host_subscribe(&h, (uint32_t)ext, KIND_DOORBELL_RING);
       ouro_host_serve_kind(&h, (uint32_t)ext, KIND_ARENA_SERVE);
 
       uint64_t cc_hb = 0;
+      uint64_t ring_due = 0;
       for (;;)
       {
          if (now_ms() - start >= timeout_ms)
@@ -254,6 +266,8 @@ int main(int argc, char **argv)
          {
             if (ev.frame.event_kind == KIND_NOTIFY)
                ouro_client_publish(&cc, KIND_ACK, ev.payload, ev.payload_len);
+            else if (ev.frame.event_kind == KIND_DOORBELL_ASK)
+               ring_due = now_ms() + DOORBELL_DELAY_MS;
             else if (ev.frame.event_kind == KIND_ECHO && (ev.frame.hdr_flags & OURO_F_REQUEST))
                ouro_client_reply(&cc, KIND_ECHO, ev.frame.correlation_id, ev.payload,
                                 ev.payload_len);
@@ -325,6 +339,11 @@ int main(int argc, char **argv)
                 * client, so cancel delivery is observable across the boundary. */
                ouro_client_publish(&cc, KIND_CANCEL_ACK, NULL, 0);
          }
+         if (ring_due && now_ms() >= ring_due)
+         {
+            ouro_client_publish(&cc, KIND_DOORBELL_RING, NULL, 0);
+            ring_due = 0;
+         }
          ouro_host_pump(&h);
 
          /* Peer closed? Reap it and move on to the next client. */
@@ -348,8 +367,19 @@ int main(int argc, char **argv)
             break;
          }
 
-         struct timespec nap = {.tv_sec = 0, .tv_nsec = 1 * 1000 * 1000};
-         nanosleep(&nap, NULL);
+         /* Sleep on the host doorbell (D13), only as long as the pending ring
+          * and the disconnect check allow. */
+         int wait_ms = HOST_IDLE_WAIT_MS;
+         if (ring_due)
+         {
+            uint64_t now = now_ms();
+            wait_ms = ring_due > now ? (int)(ring_due - now) : 0;
+         }
+         if (ouro_host_wait(&h, wait_ms) < 0)
+         {
+            struct timespec nap = {.tv_sec = 0, .tv_nsec = 1 * 1000 * 1000};
+            nanosleep(&nap, NULL);
+         }
       }
    }
 

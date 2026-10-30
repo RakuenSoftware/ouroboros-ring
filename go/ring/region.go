@@ -22,12 +22,16 @@ const (
 	ctlOffHeartbeat             = 48
 	ctlOffLeaseViewSlots        = 28 // D12, formerly reserved0
 	ctlOffLeaseViewOff          = 56 // D12, formerly reserved1[0]
-	ctlOffReserved1             = 64
+	ctlOffHostWaiting           = 64 // D13, formerly the low half of reserved1[0]
+	ctlOffReserved2             = 68
+	ctlOffReserved1             = 72
 	ctlBytes                    = 96
 
 	// D12: the lease view follows the control header when the host sets
 	// ctlFlagLeaseView.
 	ctlFlagLeaseView uint32 = 0x1
+	// D13: the host keeps host_waiting and signals client doorbells.
+	ctlFlagDoorbell  uint32 = 0x2
 	leaseViewSlots          = 4096
 	leaseViewEntry          = 16 // generation u32, len u32, offset u64
 	ctlBytesWithView        = ctlBytes + leaseViewSlots*leaseViewEntry
@@ -39,18 +43,20 @@ const (
 // Queue-pair region layout, mirroring ouro_qpair_hdr_t (96 bytes) followed by the
 // inbound and outbound rings.
 const (
-	qpMagic          uint32 = 0x52504251 // "QPBR"
-	qpOffMagic              = 0
-	qpOffSlot               = 4
-	qpOffCap                = 8
-	qpOffDataCredits        = 12
-	qpOffCtlCredits         = 16
-	qpOffCtlLost            = 20
-	qpOffInboundOff         = 24
-	qpOffOutboundOff        = 28
-	qpOffHeartbeat          = 32
-	qpOffReserved           = 40
-	qpBytes                 = 96
+	qpMagic            uint32 = 0x52504251 // "QPBR"
+	qpOffMagic                = 0
+	qpOffSlot                 = 4
+	qpOffCap                  = 8
+	qpOffDataCredits          = 12
+	qpOffCtlCredits           = 16
+	qpOffCtlLost              = 20
+	qpOffInboundOff           = 24
+	qpOffOutboundOff          = 28
+	qpOffHeartbeat            = 32
+	qpOffClientWaiting        = 40 // D13, formerly the low half of reserved[0]
+	qpOffReserved0            = 44
+	qpOffReserved             = 48
+	qpBytes                   = 96
 	// Each ring starts on a 64-byte boundary after the header.
 	qpRingAlign = 64
 )
@@ -71,6 +77,12 @@ const (
 	// Lease-release payload fields (D12).
 	leaseReleaseOffLease      = 0
 	leaseReleaseOffGeneration = 4
+
+	// Overflow payload fields (D6), decoded by subscribers since D14.
+	overflowLen         = 16
+	overflowOffShedSeq  = 0
+	overflowOffShedKind = 8
+	overflowOffDstSlot  = 12
 )
 
 // ErrRegion is returned when a mapped region fails validation.
@@ -201,6 +213,26 @@ func AttachQueuePair(mem []byte) (*QueuePair, error) {
 		return nil, err
 	}
 	return &QueuePair{mem: mem, Inbound: inbound, Outbound: outbound}, nil
+}
+
+// flags is the control region's feature-flag word.
+func (c *Control) flags() uint32 {
+	return atomic.LoadUint32((*uint32)(unsafe.Pointer(&c.mem[ctlOffFlags])))
+}
+
+// hostWaiting reports the host's D13 waiting flag.
+func (c *Control) hostWaiting() bool {
+	return atomic.LoadUint32((*uint32)(unsafe.Pointer(&c.mem[ctlOffHostWaiting]))) != 0
+}
+
+// setClientWaiting stores this client's D13 waiting flag. Go's atomics are
+// sequentially consistent, which is the ordering the protocol needs.
+func (q *QueuePair) setClientWaiting(waiting bool) {
+	var v uint32
+	if waiting {
+		v = 1
+	}
+	atomic.StoreUint32((*uint32)(unsafe.Pointer(&q.mem[qpOffClientWaiting])), v)
 }
 
 // ControlLost reports whether the host set the sticky control_lost flag.
