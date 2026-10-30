@@ -172,7 +172,8 @@ Go has `ring.NewModuleCaller` and, for many goroutines sharing one client,
 outcomes to the same results, which `OURO_TEST_MODULE_CALLER` checks across
 languages. Every caller sleeps on its client's doorbell while it waits for a
 reply. `ConcurrentModuleCaller` also delivers the notifications its slot
-subscribes to (`OnNotification`, `OnOverflow`) and publishes on that slot
+subscribes to (`OnNotification` and `OnOverflow`, each per kind, so subscribers
+sharing one caller each hear about their own) and publishes on that slot
 (`Publish`), so one long-lived process can call, listen and announce over one
 attachment.
 

@@ -38,7 +38,7 @@ type ConcurrentModuleCaller struct {
 	notesMu  sync.Mutex
 	notes    *notifier
 	handlers map[uint32]func([]byte)
-	overflow func(kind uint32)
+	overflow map[uint32]func()
 }
 
 type callerReply struct {
@@ -241,15 +241,19 @@ func (c *ConcurrentModuleCaller) OnNotification(kind uint32, fn func(payload []b
 	c.ensureNotesLocked()
 }
 
-// OnOverflow has fn told the kind of each notification this slot missed. A
-// subscriber that keeps derived state re-reads it.
-func (c *ConcurrentModuleCaller) OnOverflow(fn func(kind uint32)) {
+// OnOverflow has fn called when this slot missed a notification of kind. A
+// subscriber that keeps derived state re-reads it. Handlers are per kind, so
+// independent subscribers sharing one caller each hear about their own.
+func (c *ConcurrentModuleCaller) OnOverflow(kind uint32, fn func()) {
 	if c == nil {
 		return
 	}
 	c.notesMu.Lock()
 	defer c.notesMu.Unlock()
-	c.overflow = fn
+	if c.overflow == nil {
+		c.overflow = map[uint32]func(){}
+	}
+	c.overflow[kind] = fn
 	c.ensureNotesLocked()
 }
 
@@ -266,10 +270,10 @@ func (c *ConcurrentModuleCaller) ensureNotesLocked() {
 		}
 	}, func(kind uint32) {
 		c.notesMu.Lock()
-		fn := c.overflow
+		fn := c.overflow[kind]
 		c.notesMu.Unlock()
 		if fn != nil {
-			fn(kind)
+			fn()
 		}
 	})
 }

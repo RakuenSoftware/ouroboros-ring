@@ -235,7 +235,8 @@ func TestConcurrentCallerDeliversNotificationsBesideCalls(t *testing.T) {
 	caller := newConcurrentModuleCaller(ctx, fake)
 	rec := &recorder{}
 	caller.OnNotification(910, func(payload []byte) { rec.notify(910, payload) })
-	caller.OnOverflow(rec.missed)
+	caller.OnOverflow(910, func() { rec.missed(910) })
+	caller.OnOverflow(911, func() { t.Error("an overflow of 910 reached the handler for 911") })
 	body, err := caller.Call(ctx, kind, 1, 0, time.Second, []byte("ping"))
 	if err != nil || string(body) != "ping" {
 		t.Fatalf("call = %q, %v; a notification must not get in the way of the reply", body, err)
