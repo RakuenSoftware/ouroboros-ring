@@ -1,3 +1,6 @@
+// Command ouroboros-ring-otlp is the reference D16 telemetry exporter process:
+// the one process a host grants the consumer end of its telemetry ring. See
+// package otlpexport for what it does with the records.
 package main
 
 import (
@@ -9,6 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/RakuenSoftware/ouroboros-ring/go/otlpexport"
 	"github.com/RakuenSoftware/ouroboros-ring/go/ring"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
@@ -60,7 +64,7 @@ func main() {
 	defer reader.Close()
 
 	report := func(err error) { fmt.Fprintf(os.Stderr, "ouroboros-ring-otlp: %v\n", err) }
-	if err := newExporter(out, res).run(ctx, reader, report); errors.Is(err, ring.ErrEpoch) {
+	if err := otlpexport.New(out, res).Run(ctx, reader, report); errors.Is(err, ring.ErrEpoch) {
 		fmt.Fprintln(os.Stderr, "ouroboros-ring-otlp: the host went away")
 		os.Exit(3)
 	}

@@ -94,7 +94,7 @@ jobs:
         env:
           CGO_ENABLED: "0"
           OURO_CONFORMANCE_HOST: ${{ github.workspace }}/build/ouroboros-ring-conformance-host
-        run: go test -count=1 -run 'Conformance|CHost' -v ./ring ./cmd/...
+        run: go test -count=1 -run 'Conformance|CHost' -v ./ring ./otlpexport
       - name: C module caller against the Go module process
         run: |
           cmake --build build --target ouroboros-ring-module-runtime-harness

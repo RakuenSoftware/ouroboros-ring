@@ -1,4 +1,4 @@
-package main
+package otlpexport
 
 import (
 	"bytes"
@@ -66,7 +66,7 @@ func (c *collector) snapshot() (int, []*logspb.LogRecord) {
 	return c.requests, append([]*logspb.LogRecord(nil), c.records...)
 }
 
-func newCollector(t *testing.T) (*collector, *exporter) {
+func newCollector(t *testing.T) (*collector, *Exporter) {
 	t.Helper()
 	col := &collector{status: http.StatusOK}
 	srv := httptest.NewServer(col)
@@ -77,7 +77,7 @@ func newCollector(t *testing.T) (*collector, *exporter) {
 		t.Fatal(err)
 	}
 	res := resource.NewSchemaless()
-	return col, newExporter(out, res)
+	return col, New(out, res)
 }
 
 func attr(r *logspb.LogRecord, key string) (int64, string, bool) {
@@ -199,7 +199,7 @@ func TestExportFromCHost(t *testing.T) {
 	col, e := newCollector(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- e.run(ctx, reader, func(err error) { t.Log(err) }) }()
+	go func() { done <- e.Run(ctx, reader, func(err error) { t.Log(err) }) }()
 
 	payload := []byte("payload-never-exported")
 	if err := client.Publish(1000, payload); err != nil {

@@ -121,7 +121,10 @@ it at the release it already pins:
 go build github.com/RakuenSoftware/ouroboros-ring/go/cmd/ouroboros-ring-otlp
 ```
 
-The `ring` package imports none of its OpenTelemetry dependencies, and
+Its core is the package `go/otlpexport`, for an embedding that applies its
+own collector policy or identity and runs `otlpexport.New(...).Run` in a
+process of its own. The `ring` package imports none of its OpenTelemetry
+dependencies, and
 `scripts/check_go_no_cgo.sh` fails the build if it ever does. It sends OTLP/HTTP
 logs, one log record per ring record:
 

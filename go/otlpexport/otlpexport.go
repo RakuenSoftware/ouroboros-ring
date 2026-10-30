@@ -1,14 +1,17 @@
-// Command ouroboros-ring-otlp is the reference D16 telemetry exporter: the one
-// process a host grants the consumer end of its telemetry ring. It sends every
-// record off the host as an OTLP log record as soon as it is woken, and hands
-// records back to the host only once the collector has accepted them.
+// Package otlpexport is the reference D16 telemetry exporter: it sends every
+// record a host writes to its telemetry ring off the host, as an OTLP log
+// record, as soon as it is woken, and hands records back to the host only once
+// the collector has accepted them.
 //
 // It has no batching timer. A wakeup drains everything available into one
 // request; records that arrive while that request is in flight go in the next.
 // Its only timer is the retry backoff while the collector refuses or cannot be
 // reached, and while it waits the ring fills and the host counts what it cannot
 // hold, which reaches the collector as a gap record.
-package main
+//
+// cmd/ouroboros-ring-otlp is the command around it. An embedding that applies
+// its own collector policy or identity runs Exporter.Run itself.
+package otlpexport
 
 import (
 	"context"
@@ -23,14 +26,14 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
-const scope = "github.com/RakuenSoftware/ouroboros-ring/go/cmd/ouroboros-ring-otlp"
+const scope = "github.com/RakuenSoftware/ouroboros-ring/go/otlpexport"
 
 // maxBatch bounds one request. A larger backlog is sent as several requests,
 // back to back.
 const maxBatch = 2048
 
-// source is the consumer end of the telemetry ring; *ring.TelemetryReader is one.
-type source interface {
+// Source is the consumer end of the telemetry ring; *ring.TelemetryReader is one.
+type Source interface {
 	Available() uint64
 	Peek(i uint64) []byte
 	Release(n uint64)
@@ -48,23 +51,24 @@ func (c *collect) Enabled(context.Context, sdklog.EnabledParameters) bool { retu
 func (c *collect) Shutdown(context.Context) error                         { return nil }
 func (c *collect) ForceFlush(context.Context) error                       { return nil }
 
-// exporter turns telemetry records into OTLP log records.
-type exporter struct {
+// Exporter turns telemetry records into OTLP log records.
+type Exporter struct {
 	buf    *collect
 	logger log.Logger
 	out    sdklog.Exporter
 	now    func() time.Time
 }
 
-func newExporter(out sdklog.Exporter, res *resource.Resource) *exporter {
+// New sends through out, under the resource res (service.name and the like).
+func New(out sdklog.Exporter, res *resource.Resource) *Exporter {
 	buf := &collect{}
 	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(buf), sdklog.WithResource(res))
-	return &exporter{buf: buf, logger: provider.Logger(scope), out: out, now: time.Now}
+	return &Exporter{buf: buf, logger: provider.Logger(scope), out: out, now: time.Now}
 }
 
 // drain sends up to maxBatch available records in one request and releases
 // them once it is accepted. It reports how many it released.
-func (e *exporter) drain(ctx context.Context, src source) (uint64, error) {
+func (e *Exporter) drain(ctx context.Context, src Source) (uint64, error) {
 	n := src.Available()
 	if n == 0 {
 		return 0, nil
@@ -157,16 +161,17 @@ func toLog(raw []byte, observed time.Time) log.Record {
 	return out
 }
 
-// waiter is what run sleeps on; *ring.TelemetryReader is one.
-type waiter interface {
-	source
+// Reader is what Run drains and sleeps on; *ring.TelemetryReader is one.
+type Reader interface {
+	Source
 	Wait(time.Duration) (bool, error)
 	Interrupt()
 }
 
-// run drains whenever records are available, sleeping on the doorbell between.
-// It returns when ctx ends, or with ring.ErrEpoch when the host has gone.
-func (e *exporter) run(ctx context.Context, r waiter, report func(error)) error {
+// Run drains whenever records are available, sleeping on the doorbell between.
+// report receives export and wait errors; Run retries after them. It returns
+// nil when ctx ends, or ring.ErrEpoch when the host has gone.
+func (e *Exporter) Run(ctx context.Context, r Reader, report func(error)) error {
 	stop := context.AfterFunc(ctx, r.Interrupt)
 	defer stop()
 	backoff := time.Duration(0)
