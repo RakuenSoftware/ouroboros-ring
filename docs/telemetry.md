@@ -105,6 +105,9 @@ static ouro_attach_status_t hook(void *ctx, ouro_host_t *h, uint32_t slot,
 }
 ```
 
+A host that admits through the runtime listener says it in the exporter's
+grant file instead: `telemetry=yes`.
+
 The host hands the consumer end (`OURO_ATTACH_CAP_TELEMETRY`, two more
 descriptors after the doorbell pair) only to a granted slot that asked for it,
 had a doorbell granted, and while no other live slot holds it.

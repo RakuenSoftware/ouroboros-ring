@@ -884,8 +884,8 @@ stamp and the telemetry process's next read.
   Telemetry loss never sheds, delays or reorders the events themselves.
 - **Who consumes.** A client sets `OURO_ATTACH_CAP_TELEMETRY` (bit 2) with the doorbell bit. The host
   grants it only when telemetry is enabled, the embedding granted that slot with
-  `ouro_host_grant_telemetry` from its attach hook, the doorbell was granted, and no other live slot
-  holds the grant. The grant adds two descriptors after the five of D13: the telemetry region, then
+  `ouro_host_grant_telemetry` from its attach hook (the runtime does so for a grant file that says
+  `telemetry=yes`), the doorbell was granted, and no other live slot holds the grant. The grant adds two descriptors after the five of D13: the telemetry region, then
   the telemetry doorbell. When the consumer's slot is released, the next granted consumer continues
   from the same `tail`, so records written while no exporter was attached are not lost unless the ring
   filled.

@@ -128,6 +128,11 @@ serve=4353,4354
 and must equal the peer's `/proc/<pid>/exe`. The four kind lists say what the
 slot may publish, observe, request and serve.
 
+An optional `telemetry=yes` (or `no`, the default) names the one principal the
+host hands its telemetry ring
+([telemetry](telemetry.md), [D16](../spec/decisions.md#d16-tap-telemetry-leaves-the-host-the-moment-an-event-is-stamped)).
+The host still grants it only while no other live slot holds it.
+
 The listener also handles the case heartbeats alone handle badly. A process that
 crashes cannot detach its slot, and its supervisor may restart it at once. When
 the kernel supports `pidfd`, the runtime keeps a handle on each admitted
