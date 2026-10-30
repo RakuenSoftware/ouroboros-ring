@@ -317,6 +317,34 @@ static void test_reaping(void)
    printf("  reaping: a stalled client is reaped and its leases released\n");
 }
 
+/* D15: a client that marks itself detached is released at the next pump, and
+ * a process-bound slot is never stale-reaped. */
+static void test_detach_and_process_binding(void)
+{
+   ouro_host_config_t cfg = default_cfg();
+   ouro_host_t h;
+   must(ouro_host_create(&h, &cfg, NULL, NULL) == OURO_HOST_OK, "host create");
+   client_t a, b;
+   must(attach(&h, OURO_WIRE_VERSION, OURO_WIRE_VERSION, 1, &a) == OURO_ATTACH_OK, "A admitted");
+   must(attach(&h, OURO_WIRE_VERSION, OURO_WIRE_VERSION, 2, &b) == OURO_ATTACH_OK, "B admitted");
+   must(ouro_host_heartbeat_slots(&h) == 2, "both are heartbeat-reaped");
+
+   must(ouro_host_bind_process(&h, b.reply.handle_id) == OURO_HOST_OK, "B bound");
+   must(ouro_host_heartbeat_slots(&h) == 1, "B left the heartbeat set");
+   must(ouro_host_reap(&h, 100, 50) == 0 && ouro_host_reap(&h, 1000, 50) == 1, "A goes stale");
+   must(h.slots[b.reply.handle_id].in_use, "B never heartbeat and was kept");
+
+   atomic_store_explicit(&b.qp.hdr->client_heartbeat, OURO_HEARTBEAT_DETACHED,
+                         memory_order_release);
+   (void)ouro_host_pump(&h);
+   must(ouro_host_admitted(&h) == 0, "B's detach released it at the pump");
+
+   client_unmap(&a);
+   client_unmap(&b);
+   ouro_host_destroy(&h);
+   printf("  detach and process binding: released on detach, never stale-reaped while bound\n");
+}
+
 static void test_epoch(void)
 {
    ouro_host_config_t cfg = default_cfg();
@@ -405,7 +433,11 @@ static void test_owned_attach_keeps_external_policy(void)
                (mode == 0 ? OURO_ATTACH_OK : OURO_ATTACH_DENIED_POLICY),
            "owned identity cannot impersonate external principal");
       if (mode == 0)
+      {
+         /* D15: it lives in the host's process, so no heartbeat is owed. */
+         must(ouro_host_heartbeat_slots(&host) == 0, "an owned client is process-bound");
          client_unmap(&client);
+      }
       must(host.admit == reject_external && host.admit_ctx == &external_calls,
            "external policy retained");
       close(pair[0]);
@@ -424,6 +456,7 @@ int main(void)
    test_denials();
    test_full_host();
    test_reaping();
+   test_detach_and_process_binding();
    test_epoch();
    test_capability_hook();
    test_owned_attach_keeps_external_policy();

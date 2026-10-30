@@ -184,6 +184,9 @@ fn serve(bus: Arc<Bus>, backend: Arc<Fixture>, actions: impl FnOnce(&Bus, &Fixtu
             }],
             handler: Some(handler),
             max_idle_poll: Duration::ZERO,
+            notify: None,
+            overflow: None,
+            started: None,
             after_attach: None,
         };
         // Stage 2 is intentionally served by the transport but not by the adapter.

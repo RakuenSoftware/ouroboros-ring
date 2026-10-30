@@ -69,16 +69,18 @@ for name, value in [
 ]:
     row(f"kind.{name}", value)
 
-# ---- control region (bus_control_t; D1, D4, D12) -----------------------------
+# ---- control region (bus_control_t; D1, D4, D12, D13) -----------------------------
 row("control.magic", le_magic("BCTL"))
 struct("control", 96, [
     ("magic", 4), ("spec_version", 4), ("layout_version", 4), ("flags", 4),
     ("slot_size", 4), ("inline_budget", 4), ("queue_capacity", 4),
     ("lease_view_slots", 4),
     ("arena_size", 8), ("host_epoch", 8), ("host_heartbeat", 8),
-    ("lease_view_off", 8), ("reserved1", 32),
+    ("lease_view_off", 8), ("host_waiting", 4), ("reserved2", 4),
+    ("reserved1", 24),
 ])
 row("control.flag.lease_view", 0x1, "D12: a lease view follows the header")
+row("control.flag.doorbell", 0x2, "D13: the host keeps host_waiting and signals doorbells")
 
 # ---- lease view (D12) --------------------------------------------------------
 row("lease_view.slots", 4096)
@@ -91,7 +93,8 @@ row("qpair.magic", le_magic("QBPR"))
 struct("qpair", 96, [
     ("magic", 4), ("slot_size", 4), ("capacity", 4), ("data_credits", 4),
     ("control_credits", 4), ("control_lost", 4), ("inbound_off", 4),
-    ("outbound_off", 4), ("client_heartbeat", 8), ("reserved", 56),
+    ("outbound_off", 4), ("client_heartbeat", 8), ("client_waiting", 4),
+    ("reserved0", 4), ("reserved", 48),
 ])
 row("qpair.ring_align", 64, "each ring starts on a 64-byte boundary after the header")
 
@@ -112,15 +115,18 @@ struct("arena", 16, [("magic", 4), ("reserved", 4), ("size", 8)])
 
 # ---- attach handshake (bus_attach_request_t / bus_attach_reply_t) -------------
 row("attach_request.magic", le_magic("ABRQ"))
-struct("attach_request", 16, [
+struct("attach_request", 20, [
     ("magic", 4), ("wire_version_min", 2), ("wire_version_max", 2),
-    ("principal_class", 4), ("principal_ref", 4),
+    ("principal_class", 4), ("principal_ref", 4), ("capabilities", 4),
 ])
+row("attach_request.v0_size", 16, "D13: a host accepts the 16-byte v0 request too")
+row("attach.cap.doorbell", 0x1, "D13: request and grant a doorbell pair")
+row("attach.cap.process_liveness", 0x2, "D15: the host releases the slot when the client process exits")
 row("attach_reply.magic", le_magic("ABRP"))
 struct("attach_reply", 48, [
     ("magic", 4), ("status", 4), ("handle_id", 4), ("wire_version", 4),
     ("slot_size", 4), ("inline_budget", 4), ("queue_capacity", 4),
-    ("reserved", 4), ("arena_size", 8), ("host_epoch", 8),
+    ("capabilities", 4), ("arena_size", 8), ("host_epoch", 8),
 ])
 for name, value in [("ok", 0), ("denied_policy", 1), ("denied_version", 2),
                     ("denied_noslot", 3), ("protocol", 4)]:
@@ -129,9 +135,15 @@ row("attach.descriptors", 3, "SCM_RIGHTS order: control, arena, queue pair")
 row("attach.fd.control", 0)
 row("attach.fd.arena", 1)
 row("attach.fd.qpair", 2)
+row("attach.descriptors_doorbell", 5, "D13: then host doorbell, client doorbell")
+row("attach.fd.host_doorbell", 3)
+row("attach.fd.client_doorbell", 4)
 
 # ---- lease release payload (D12) ---------------------------------------------
 struct("lease_release", 8, [("lease_id", 4), ("generation", 4)])
+
+# ---- overflow payload (D6; decoded by subscribers since D14) ------------------
+struct("overflow", 16, [("shed_seq", 8), ("shed_kind", 4), ("dst_slot", 4)])
 
 # ---- AMOD module envelope ----------------------------------------------------
 row("amod.magic", le_magic("AMOD"))

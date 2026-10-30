@@ -73,6 +73,17 @@ typedef struct
    ouro_client_lease_t pending_lease;
    uint32_t release_count;
    ouro_client_lease_t releases[OURO_CLIENT_MAX_PENDING_RELEASES];
+
+   /* D13: the doorbell pair, valid iff have_doorbell. The host doorbell is
+    * written to wake the host; the client doorbell is read to sleep. */
+   int have_doorbell;
+   int host_doorbell_fd;
+   int doorbell_fd;
+
+   /* D15: a process handle on the host, -1 where the platform has none. Its
+    * exit ends ouro_client_wait and reads as an epoch change. */
+   int host_pidfd;
+   _Atomic int host_gone;
 } ouro_client_t;
 
 /* A received event. `payload` points into the shared inbound slot, or for an
@@ -155,6 +166,31 @@ int ouro_client_epoch_changed(const ouro_client_t *c);
 /* 1 if the host set this client's sticky control_lost flag (a control-class
  * notice could not be delivered even from the reserve). */
 int ouro_client_control_lost(const ouro_client_t *c);
+
+/* D13. Sleep until the inbound ring has an event, the host has made room in a
+ * full outbound ring, ouro_client_interrupt is called, or timeout_ms passes
+ * (negative waits indefinitely). Returns 1 when woken or when an event was
+ * already waiting, 0 on timeout, and -1 when the host granted no doorbell, in
+ * which case the caller keeps its own backoff. One thread at a time, like poll. */
+int ouro_client_wait(ouro_client_t *c, int timeout_ms);
+
+/* Wake this client's own ouro_client_wait from another thread: a handler that
+ * finished, a caller with something to send, shutdown. Does nothing without a
+ * doorbell. */
+void ouro_client_interrupt(ouro_client_t *c);
+
+/* The client doorbell, for a caller that multiplexes it with other
+ * descriptors. Readable means "poll". -1 without a doorbell. */
+int ouro_client_doorbell_fd(const ouro_client_t *c);
+
+/* D15: 1 when the host watches this client's process and releases its slot on
+ * exit, so the client need not heartbeat while it is idle. */
+int ouro_client_process_liveness(const ouro_client_t *c);
+
+/* D15: 1 when both ends watch each other's process: the host releases this
+ * client on exit, and this client's wait ends when the host exits. Then an idle
+ * client may wait indefinitely. */
+int ouro_client_liveness_watched(const ouro_client_t *c);
 
 const char *ouro_client_result_name(ouro_client_result_t r);
 

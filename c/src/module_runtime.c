@@ -11,8 +11,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define MODULE_MAX_INFLIGHT 16u
+/* D13 waits. Idle: no busier than the heartbeat needs. Busy: in-flight
+ * deadlines are enforced from this loop. */
+#define MODULE_IDLE_WAIT_MS 5000
+#define MODULE_BUSY_WAIT_MS 10
 
 typedef struct
 {
@@ -31,6 +36,7 @@ typedef struct
    uint32_t response_capacity;
    uint32_t response_len;
    ouro_module_status_t status;
+   ouro_client_t *client; /* interrupted when the handler finishes (D13) */
 } module_work_t;
 
 typedef struct
@@ -47,6 +53,20 @@ typedef struct
 } module_assembly_t;
 
 static volatile sig_atomic_t process_running = 1;
+/* The running process's client doorbell (D13), so a stop wakes the loop at
+ * once even when the signal lands on a handler thread. -1 when none. */
+static volatile sig_atomic_t process_wake_fd = -1;
+
+static void process_wake(void)
+{
+   int fd = process_wake_fd;
+   if (fd >= 0)
+   {
+      uint64_t one = 1;
+      ssize_t ignored = write(fd, &one, sizeof one); /* async-signal-safe */
+      (void)ignored;
+   }
+}
 
 typedef struct
 {
@@ -72,11 +92,13 @@ static void process_signal(int signal_number)
 {
    (void)signal_number;
    process_running = 0;
+   process_wake();
 }
 
 void ouro_module_process_stop(void)
 {
    process_running = 0;
+   process_wake();
 }
 
 int ouro_module_invocation_cancelled(const ouro_module_invocation_t *invocation)
@@ -141,7 +163,11 @@ static void *run_handler(void *argument)
          work->response_len = 0;
       }
    }
+   /* Read before publishing done: once done is set the loop may reap and reuse
+    * this item. Then wake the loop so the reply goes out now (D13). */
+   ouro_client_t *client = work->client;
    atomic_store_explicit(&work->done, 1, memory_order_release);
+   ouro_client_interrupt(client);
    return NULL;
 }
 
@@ -305,6 +331,38 @@ static void reap_work(module_loop_t *loop, module_work_t *work)
    }
 }
 
+static int any_work(const module_work_t *work)
+{
+   for (size_t i = 0; i < MODULE_MAX_INFLIGHT; ++i)
+      if (work[i].in_use)
+         return 1;
+   return 0;
+}
+
+/* D14: hand a subscribed notification, or the kind an overflow names, to the
+ * module. Reserved kinds other than overflow are the runtime's business. */
+static void deliver_notification(const ouro_module_process_config_t *config,
+                                 const ouro_event_t *event)
+{
+   const ouro_frame_t *f = &event->frame;
+   if (!(f->hdr_flags & OURO_F_NOTIFICATION))
+      return;
+   if (f->hdr_flags & OURO_F_CONTROL)
+   {
+      if (f->event_kind == OURO_KIND_OVERFLOW && config->overflow && event->payload &&
+          event->payload_len >= OURO_OVERFLOW_LEN)
+      {
+         const uint8_t *k = event->payload + OURO_OVERFLOW_OFF_SHED_KIND;
+         uint32_t shed_kind =
+             (uint32_t)k[0] | (uint32_t)k[1] << 8 | (uint32_t)k[2] << 16 | (uint32_t)k[3] << 24;
+         config->overflow(shed_kind, config->user_data);
+      }
+      return;
+   }
+   if (config->notify && f->event_kind >= OURO_KIND_MODULE_BASE)
+      config->notify(f->event_kind, event->payload, event->payload_len, config->user_data);
+}
+
 static void stop_work(module_loop_t *loop, module_work_t *work)
 {
    for (size_t i = 0; i < MODULE_MAX_INFLIGHT; ++i)
@@ -431,6 +489,7 @@ static void start_request(module_loop_t *loop, module_work_t *work, module_assem
    item->invocation.source_handle = event->frame.src_handle;
    item->handler = config->handler;
    item->user_data = config->user_data;
+   item->client = loop->client;
    item->request_len = request_len;
    item->response_capacity = OURO_MODULE_MESSAGE_MAX_BODY;
    if (pthread_create(&item->thread, NULL, run_handler, item) == 0)
@@ -503,8 +562,24 @@ int ouro_module_service_run(ouro_client_t *client, const ouro_module_process_con
       {
          start_request(&loop, work, assemblies, &event, now);
       }
-      const struct timespec idle = {.tv_sec = 0, .tv_nsec = 1000000};
-      nanosleep(&idle, NULL);
+      else if (result == OURO_CLIENT_OK)
+      {
+         deliver_notification(config, &event);
+      }
+      if (result == OURO_CLIENT_OK)
+         continue; /* drain everything queued before sleeping */
+      /* Nothing queued. Sleep on the doorbell (D13): a request, a finished
+       * handler, or the next heartbeat wakes it. In-flight work also has
+       * deadlines to enforce, so it is checked more often. A host that watches
+       * this process (D15) needs no heartbeat, so idle is indefinite. */
+      int timeout = any_work(work)                      ? MODULE_BUSY_WAIT_MS
+                    : ouro_client_liveness_watched(client) ? -1
+                                                         : MODULE_IDLE_WAIT_MS;
+      if (ouro_client_wait(client, timeout) < 0)
+      {
+         const struct timespec idle = {.tv_sec = 0, .tv_nsec = 1000000};
+         nanosleep(&idle, NULL); /* an older host: no doorbell */
+      }
    }
    stop_work(&loop, work);
    for (size_t i = 0; i < MODULE_MAX_INFLIGHT; ++i)
@@ -536,7 +611,9 @@ int ouro_module_process_run(const ouro_module_process_config_t *config)
    }
    ouro_endpoint_close(&socket_fd);
 
+   process_wake_fd = ouro_client_doorbell_fd(&client);
    int result = ouro_module_service_run(&client, config, process_stopped, NULL);
+   process_wake_fd = -1;
    ouro_client_detach(&client);
    return result;
 }

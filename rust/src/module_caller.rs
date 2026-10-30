@@ -46,6 +46,8 @@ const IDLE_MAX: Duration = Duration::from_millis(1);
 /// bound (100 attempts, 1 ms apart).
 const CANCEL_ATTEMPTS: u32 = 100;
 const CANCEL_RETRY: Duration = Duration::from_millis(1);
+/// How often a call asleep on the doorbell checks its cancellation callback.
+const CANCEL_CHECK: Duration = Duration::from_millis(50);
 
 /// The narrow ring surface a caller needs, so the protocol logic is testable
 /// without mappings. [`Client`] is the real implementation.
@@ -62,6 +64,11 @@ pub trait CallerRing {
     fn heartbeat(&self, now: u64);
     /// Largest payload one inline request fragment may carry.
     fn max_inline_payload(&self) -> u32;
+    /// D13: sleep until the ring moves or `timeout` passes. Without a
+    /// doorbell, [`RingError::NoDoorbell`], and the caller keeps polling.
+    fn wait(&self, _timeout: Duration) -> Result<bool, RingError> {
+        Err(RingError::NoDoorbell)
+    }
 }
 
 impl CallerRing for Client {
@@ -86,6 +93,9 @@ impl CallerRing for Client {
     fn max_inline_payload(&self) -> u32 {
         Client::max_inline_payload(self)
     }
+    fn wait(&self, timeout: Duration) -> Result<bool, RingError> {
+        Client::wait(self, Some(timeout))
+    }
 }
 
 impl<T: CallerRing + ?Sized> CallerRing for &T {
@@ -104,6 +114,9 @@ impl<T: CallerRing + ?Sized> CallerRing for &T {
     fn max_inline_payload(&self) -> u32 {
         (**self).max_inline_payload()
     }
+    fn wait(&self, timeout: Duration) -> Result<bool, RingError> {
+        (**self).wait(timeout)
+    }
 }
 
 impl<T: CallerRing + ?Sized> CallerRing for Arc<T> {
@@ -121,6 +134,9 @@ impl<T: CallerRing + ?Sized> CallerRing for Arc<T> {
     }
     fn max_inline_payload(&self) -> u32 {
         (**self).max_inline_payload()
+    }
+    fn wait(&self, timeout: Duration) -> Result<bool, RingError> {
+        (**self).wait(timeout)
     }
 }
 
@@ -390,8 +406,10 @@ impl<B: CallerRing> ModuleCaller<B> {
                 {
                     Ok(()) => break,
                     Err(RingError::WouldBlock) => {
-                        std::thread::sleep(idle);
-                        idle = (idle * 2).min(IDLE_MAX);
+                        if !wait_for_ring(&self.bus, call.deadline_ns) {
+                            std::thread::sleep(idle);
+                            idle = (idle * 2).min(IDLE_MAX);
+                        }
                     }
                     Err(e) => return Err(Ended::new(CallError::Transport(e), open)),
                 }
@@ -425,8 +443,10 @@ impl<B: CallerRing> ModuleCaller<B> {
             let event = match self.bus.poll() {
                 Ok(Some(event)) => event,
                 Ok(None) => {
-                    std::thread::sleep(idle);
-                    idle = (idle * 2).min(IDLE_MAX);
+                    if !wait_for_ring(&self.bus, call.deadline_ns) {
+                        std::thread::sleep(idle);
+                        idle = (idle * 2).min(IDLE_MAX);
+                    }
                     continue;
                 }
                 // The inbound ring is unreadable (the host restarted): a cancel
@@ -522,6 +542,18 @@ impl Ended {
     fn closed(error: CallError) -> Ended {
         Ended { error, open: false }
     }
+}
+
+/// Sleep on the doorbell (D13) until the reply or room arrives, in slices
+/// short enough that a caller's cancellation check is noticed, and never past
+/// the deadline. False when there is no doorbell, so the caller polls.
+fn wait_for_ring<B: CallerRing>(bus: &B, deadline_ns: u64) -> bool {
+    let mut slice = CANCEL_CHECK;
+    let now = monotonic_ns();
+    if deadline_ns != 0 && now != 0 {
+        slice = slice.min(Duration::from_nanos(deadline_ns.saturating_sub(now)));
+    }
+    !matches!(bus.wait(slice), Err(RingError::NoDoorbell))
 }
 
 fn expired(deadline_ns: u64) -> bool {

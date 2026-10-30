@@ -86,6 +86,13 @@
 #define OURO_LEASE_RELEASE_OFF_LEASE      0u
 #define OURO_LEASE_RELEASE_OFF_GENERATION 4u
 
+/* The inline body of an OURO_KIND_OVERFLOW control event (D6): which event was
+ * shed, and to which slot. Little-endian. Decoded by subscribers since D14. */
+#define OURO_OVERFLOW_LEN          16u
+#define OURO_OVERFLOW_OFF_SHED_SEQ  0u
+#define OURO_OVERFLOW_OFF_SHED_KIND 8u
+#define OURO_OVERFLOW_OFF_DST_SLOT  12u
+
 /* Decoded frame. Field order here follows the wire layout so the two read
  * together; the encoder writes explicit little-endian bytes, so this struct's
  * in-memory layout is never itself the contract. */

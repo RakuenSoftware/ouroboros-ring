@@ -11,6 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
+#include <stdatomic.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <stddef.h>
@@ -29,6 +32,99 @@
  * registry and drop any pending request it was party to. */
 void ouro_route_forget_slot(ouro_host_t *h, uint32_t slot);
 
+/* ------------------------------------------------------------------ */
+/* doorbells (D13)                                                      */
+
+static void doorbell_ring(int fd)
+{
+   uint64_t one = 1;
+   ssize_t n;
+   do
+      n = write(fd, &one, sizeof one);
+   while (n < 0 && errno == EINTR);
+   /* EAGAIN means the counter is already non-zero: the sleeper will wake. */
+}
+
+static void doorbell_drain(int fd)
+{
+   uint64_t count;
+   while (read(fd, &count, sizeof count) < 0 && errno == EINTR)
+      ;
+}
+
+/* Called after the host commits into this client's inbound ring or consumes
+ * from its outbound ring. The fence pairs with the one in the client's wait:
+ * either the client's re-check sees this commit, or this load sees its flag. */
+void ouro_host_signal_slot(ouro_slot_t *s)
+{
+   if (s->doorbell_fd < 0 || !s->qpair.hdr)
+      return;
+   atomic_thread_fence(memory_order_seq_cst);
+   if (atomic_load_explicit(&s->qpair.hdr->client_waiting, memory_order_relaxed) != 0)
+      doorbell_ring(s->doorbell_fd);
+}
+
+static int host_has_work(const ouro_host_t *h)
+{
+   for (uint32_t i = 0; i < h->cfg.max_slots; i++)
+   {
+      const ouro_slot_t *s = &h->slots[i];
+      /* A blocked producer is retried each pump, so it counts as work only once
+       * a destination may have room; the destination's consume rings the host
+       * doorbell, which is how that is learned. */
+      if (s->in_use && !s->blocked && ouro_ring_count(&s->qpair.outbound) > 0)
+         return 1;
+   }
+   return 0;
+}
+
+int ouro_host_wait_begin(ouro_host_t *h)
+{
+   if (!h || !h->slots || !h->control || h->doorbell_fd < 0)
+      return -1;
+   atomic_store_explicit(&h->control->host_waiting, 1, memory_order_seq_cst);
+   atomic_thread_fence(memory_order_seq_cst);
+   if (host_has_work(h))
+   {
+      atomic_store_explicit(&h->control->host_waiting, 0, memory_order_relaxed);
+      return 1;
+   }
+   return 0;
+}
+
+void ouro_host_wait_end(ouro_host_t *h)
+{
+   if (!h || !h->control || h->doorbell_fd < 0)
+      return;
+   doorbell_drain(h->doorbell_fd);
+   atomic_store_explicit(&h->control->host_waiting, 0, memory_order_relaxed);
+}
+
+int ouro_host_wait(ouro_host_t *h, int timeout_ms)
+{
+   int begun = ouro_host_wait_begin(h);
+   if (begun != 0)
+      return begun;
+   struct pollfd p = {.fd = h->doorbell_fd, .events = POLLIN};
+   int rc;
+   /* EINTR ends the wait as a timeout: a signal-driven stop must not wait
+    * out the whole timeout. */
+   rc = poll(&p, 1, timeout_ms);
+   ouro_host_wait_end(h);
+   return rc > 0 ? 1 : 0;
+}
+
+void ouro_host_wake(ouro_host_t *h)
+{
+   if (h && h->doorbell_fd >= 0)
+      doorbell_ring(h->doorbell_fd);
+}
+
+int ouro_host_doorbell_fd(const ouro_host_t *h)
+{
+   return h ? h->doorbell_fd : -1;
+}
+
 static void slot_release(ouro_host_t *h, uint32_t idx)
 {
    ouro_slot_t *s = &h->slots[idx];
@@ -42,8 +138,11 @@ static void slot_release(ouro_host_t *h, uint32_t idx)
    ouro_region_unmap(&s->qpair_region);
    if (s->qpair_fd >= 0)
       close(s->qpair_fd);
+   if (s->doorbell_fd >= 0)
+      close(s->doorbell_fd);
    memset(s, 0, sizeof *s);
    s->qpair_fd = -1;
+   s->doorbell_fd = -1;
    if (h->admitted > 0)
       h->admitted--;
 }
@@ -54,6 +153,23 @@ ouro_host_result_t ouro_host_release_slot(ouro_host_t *h, uint32_t slot)
       return OURO_HOST_ERR_ARG;
    slot_release(h, slot);
    return OURO_HOST_OK;
+}
+
+ouro_host_result_t ouro_host_bind_process(ouro_host_t *h, uint32_t slot)
+{
+   if (!h || !h->slots || slot >= h->cfg.max_slots || !h->slots[slot].in_use)
+      return OURO_HOST_ERR_ARG;
+   h->slots[slot].process_bound = 1;
+   return OURO_HOST_OK;
+}
+
+uint32_t ouro_host_heartbeat_slots(const ouro_host_t *h)
+{
+   uint32_t n = 0;
+   for (uint32_t i = 0; h && h->slots && i < h->cfg.max_slots; i++)
+      if (h->slots[i].in_use && !h->slots[i].process_bound)
+         n++;
+   return n;
 }
 
 ouro_host_result_t ouro_host_create(ouro_host_t *h, const ouro_host_config_t *cfg, ouro_admit_fn admit,
@@ -68,6 +184,7 @@ ouro_host_result_t ouro_host_create(ouro_host_t *h, const ouro_host_config_t *cf
    h->admit_ctx = admit_ctx;
    h->control_fd = -1;
    h->arena_fd = -1;
+   h->doorbell_fd = -1;
 
    /* Control region. */
    if (ouro_region_create("ring-control", ouro_control_bytes(), &h->control_region) != OURO_REGION_OK)
@@ -112,7 +229,16 @@ ouro_host_result_t ouro_host_create(ouro_host_t *h, const ouro_host_config_t *cf
    if (!h->slots)
       goto fail;
    for (uint32_t i = 0; i < cfg->max_slots; i++)
+   {
       h->slots[i].qpair_fd = -1;
+      h->slots[i].doorbell_fd = -1;
+   }
+
+   /* D13. Without a doorbell the host still works; it grants none and its
+    * caller keeps polling, exactly as before. */
+   h->doorbell_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+   if (h->doorbell_fd >= 0)
+      atomic_fetch_or_explicit(&h->control->flags, OURO_CONTROL_F_DOORBELL, memory_order_release);
 
    return OURO_HOST_OK;
 
@@ -147,7 +273,9 @@ void ouro_host_destroy(ouro_host_t *h)
    ouro_region_unmap(&h->control_region);
    if (h->control_fd >= 0)
       close(h->control_fd);
-   h->arena_fd = h->control_fd = -1;
+   if (h->doorbell_fd >= 0)
+      close(h->doorbell_fd);
+   h->arena_fd = h->control_fd = h->doorbell_fd = -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -197,7 +325,8 @@ static int host_owned_socketpair(int fd)
    return 0; /* No guessed identity on platforms without same-process attestation. */
 #endif
 }
-static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *slot_out, int owned)
+static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *slot_out, int owned,
+                                       int local)
 {
    if (slot_out)
       *slot_out = UINT32_MAX;
@@ -205,13 +334,16 @@ static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *sl
       return OURO_HOST_ERR_ARG;
 
    ouro_attach_request_t req;
-   int rfds[3];
+   memset(&req, 0, sizeof req);
+   int rfds[OURO_ATTACH_FDS_MAX];
    int nfd = 0;
-   long n = ouro_fd_recv(conn_fd, &req, sizeof req, rfds, 3, &nfd);
+   long n = ouro_fd_recv(conn_fd, &req, sizeof req, rfds, OURO_ATTACH_FDS_MAX, &nfd);
    /* A client never sends descriptors; if it tried, drop them. */
    for (int i = 0; i < nfd; i++)
       close(rfds[i]);
-   if (n != (long)sizeof req || req.magic != OURO_ATTACH_REQ_MAGIC)
+   /* A v0 client sends 16 bytes and leaves capabilities zero (D13). */
+   if ((n != (long)sizeof req && n != (long)OURO_ATTACH_REQ_V0_BYTES) ||
+       req.magic != OURO_ATTACH_REQ_MAGIC)
       return deny(conn_fd, OURO_ATTACH_PROTOCOL);
 
    /* Version negotiation: highest common, or deny. */
@@ -240,6 +372,7 @@ static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *sl
    ouro_slot_t *s = &h->slots[idx];
    memset(s, 0, sizeof *s);
    s->qpair_fd = -1;
+   s->doorbell_fd = -1;
 
    size_t qbytes = ouro_qpair_bytes(h->cfg.slot_size, h->cfg.queue_capacity);
    if (qbytes == 0)
@@ -263,6 +396,9 @@ static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *sl
    s->principal_ref = req.principal_ref;
    s->last_heartbeat = 0;
    s->heartbeat_at = 0;
+   /* D15: a client attached in the host's own process (owned, or through
+    * ouro_host_attach_local) cannot outlive it. */
+   s->process_bound = owned || local;
    h->admitted++;
 
    if (!owned && h->attach_hook)
@@ -306,11 +442,30 @@ static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *sl
       return deny(conn_fd, OURO_ATTACH_DENIED_NOSLOT);
    }
 
-   int gfds[OURO_ATTACH_FDS];
+   /* D13: grant a doorbell pair only to a client that asked for one. The
+    * client's own doorbell is created here and kept by the slot; the client
+    * receives a duplicate in the grant. */
+   int nfds = OURO_ATTACH_FDS;
+   /* D15: the attach hook bound the slot to the client's process. */
+   if ((req.capabilities & OURO_ATTACH_CAP_PROCESS_LIVENESS) && s->process_bound)
+      reply.capabilities |= OURO_ATTACH_CAP_PROCESS_LIVENESS;
+   if ((req.capabilities & OURO_ATTACH_CAP_DOORBELL) && h->doorbell_fd >= 0)
+   {
+      s->doorbell_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+      if (s->doorbell_fd >= 0)
+      {
+         reply.capabilities |= OURO_ATTACH_CAP_DOORBELL;
+         nfds = OURO_ATTACH_FDS_DOORBELL;
+      }
+   }
+
+   int gfds[OURO_ATTACH_FDS_MAX];
    gfds[OURO_ATTACH_FD_CONTROL] = control_ro;
    gfds[OURO_ATTACH_FD_ARENA] = h->arena_fd;
    gfds[OURO_ATTACH_FD_QPAIR] = s->qpair_fd;
-   int rc = ouro_fd_send(conn_fd, &reply, sizeof reply, gfds, OURO_ATTACH_FDS);
+   gfds[OURO_ATTACH_FD_HOST_DOORBELL] = h->doorbell_fd;
+   gfds[OURO_ATTACH_FD_CLIENT_DOORBELL] = s->doorbell_fd;
+   int rc = ouro_fd_send(conn_fd, &reply, sizeof reply, gfds, nfds);
    close(control_ro); /* the client holds its own dup now */
    if (rc != 0)
    {
@@ -325,15 +480,19 @@ static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *sl
 
 ouro_host_result_t ouro_host_serve_attach(ouro_host_t *h, int fd)
 {
-   return serve_attach(h, fd, NULL, 0);
+   return serve_attach(h, fd, NULL, 0, 0);
 }
 ouro_host_result_t ouro_host_serve_attach_ex(ouro_host_t *h, int fd, uint32_t *slot)
 {
-   return serve_attach(h, fd, slot, 0);
+   return serve_attach(h, fd, slot, 0, 0);
 }
 ouro_host_result_t ouro_host_serve_attach_owned(ouro_host_t *h, int fd)
 {
-   return serve_attach(h, fd, NULL, 1);
+   return serve_attach(h, fd, NULL, 1, 0);
+}
+ouro_host_result_t ouro_host_serve_attach_in_process(ouro_host_t *h, int fd, int owned)
+{
+   return serve_attach(h, fd, NULL, owned, 1);
 }
 
 /* ------------------------------------------------------------------ */
@@ -351,6 +510,14 @@ uint32_t ouro_host_reap(ouro_host_t *h, uint64_t now, uint64_t stale_ns)
          continue;
 
       uint64_t hb = atomic_load_explicit(&s->qpair.hdr->client_heartbeat, memory_order_acquire);
+      if (hb == OURO_HEARTBEAT_DETACHED && !s->blocked)
+      {
+         slot_release(h, i); /* D15: it said it left */
+         reaped++;
+         continue;
+      }
+      if (s->process_bound)
+         continue; /* D15: its owner releases it when the process exits */
       if (hb != s->last_heartbeat)
       {
          /* The client is alive; note the advance. */

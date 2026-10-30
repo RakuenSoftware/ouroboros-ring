@@ -33,6 +33,63 @@ A blocked event stays at the head of its producer's ring and is retried on the
 next pump; the host remembers which destinations already received it, so a
 retry never delivers twice.
 
+## Sleeping and waking
+
+An idle end of a queue pair sleeps in the kernel, and the other end wakes it
+only when it is asleep
+([D13](../spec/decisions.md#d13-doorbells-idle-ends-sleep-in-the-kernel)). The
+host keeps one `eventfd` every client writes, and one per client that it writes,
+handed over at attach. Each side has a waiting flag the other can read:
+`host_waiting` in the control region, `client_waiting` in the queue pair.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as client
+    participant QP as queue pair
+    participant H as host
+    Note over H: ouro_host_wait: nothing queued
+    H->>H: host_waiting = 1, fence, re-check every outbound ring
+    H->>H: sleep on the host doorbell
+    C->>QP: publish: commit into the outbound ring
+    C->>C: fence, read host_waiting: 1
+    C->>H: write the host doorbell
+    H->>QP: wake, host_waiting = 0, pump
+    H->>QP: deliver into the destination's inbound ring
+    H->>H: fence, read that client's client_waiting
+    Note over H,C: signal it only if it is asleep
+```
+
+- **No lost wakeups.** The sleeper sets its flag, fences, and re-checks its
+  rings before it sleeps; the signaller commits, fences, and reads the flag.
+  Either the re-check sees the commit or the read sees the flag.
+- **No extra calls under load.** A busy side never sets its flag, so a
+  signaller never writes a doorbell to it.
+- **Every direction.** The host signals a client after delivering to it and
+  after draining its outbound ring (room for a publisher that hit
+  `would_block`). A client signals the host after publishing and after reading
+  from its inbound ring (room for a producer the host is holding). A held
+  producer alone never wakes the host.
+- **Older peers.** A client asks for a doorbell in its attach request. A host
+  that predates D13 grants none, and a client that predates it never asks; the
+  side without one keeps polling. `ouro_host_wait`, `ouro_client_wait`,
+  `Client.Wait` and `Client::wait` say so at once instead of sleeping.
+
+The waits are `ouro_host_wait` for the host and `ouro_client_wait`,
+`Client.Wait` (Go) and `Client::wait` (Rust) for a client, each with a timeout
+for maintenance such as heartbeats. An embedding that guards the host with a
+lock other threads take, as the runtime listener does, splits the host's wait:
+`ouro_host_wait_begin` under the lock, a wait on `ouro_host_doorbell_fd`
+without it, then `ouro_host_wait_end`. `ouro_client_interrupt` and its Go and Rust
+counterparts wake a client's own wait from another thread. The module runtimes
+and callers in all three languages use them, so an idle module process wakes
+only to heartbeat, and not at all where liveness is the process
+([D15](../spec/decisions.md#d15-liveness-is-the-process-not-a-timer)): a
+runtime-admitted client is granted `OURO_ATTACH_CAP_PROCESS_LIVENESS`, the
+runtime releases its slot when the process exits, and the client's wait also
+ends when the host's process exits. Such a client waits with no timeout, and
+an owner whose `ouro_runtime_maintenance_due` is 0 needs no reap timer.
+
 ## Routing by pattern
 
 | Frame | Goes to | If there is nobody |

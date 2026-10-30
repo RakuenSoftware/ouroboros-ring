@@ -32,13 +32,22 @@ pub(crate) const CTL_OFF_EPOCH: usize = 40;
 )]
 pub(crate) const CTL_OFF_HEARTBEAT: usize = 48;
 pub(crate) const CTL_OFF_LEASE_VIEW_OFF: usize = 56; // D12, formerly reserved1[0]
+/// D13: the host's waiting flag; it signals the host doorbell only when set.
+pub(crate) const CTL_OFF_HOST_WAITING: usize = 64;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "host-owned or reserved; held to the table")
 )]
-pub(crate) const CTL_OFF_RESERVED1: usize = 64;
+pub(crate) const CTL_OFF_RESERVED2: usize = 68;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "host-owned or reserved; held to the table")
+)]
+pub(crate) const CTL_OFF_RESERVED1: usize = 72;
 /// D12: the control region advertises a lease view after its header.
 pub(crate) const CTL_F_LEASE_VIEW: u32 = 0x1;
+/// D13: the host keeps host_waiting and signals client doorbells.
+pub(crate) const CTL_F_DOORBELL: u32 = 0x2;
 
 // ---- lease view (D12) -------------------------------------------------------
 pub(crate) const LEASE_VIEW_SLOTS: usize = 4096;
@@ -69,11 +78,18 @@ pub(crate) const QP_OFF_CONTROL_LOST: usize = 20;
 pub(crate) const QP_OFF_INBOUND: usize = 24;
 pub(crate) const QP_OFF_OUTBOUND: usize = 28;
 pub(crate) const QP_OFF_HEARTBEAT: usize = 32;
+/// D13: this client's waiting flag, read by the host before it signals.
+pub(crate) const QP_OFF_CLIENT_WAITING: usize = 40;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "host-owned or reserved; held to the table")
 )]
-pub(crate) const QP_OFF_RESERVED: usize = 40;
+pub(crate) const QP_OFF_RESERVED0: usize = 44;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "host-owned or reserved; held to the table")
+)]
+pub(crate) const QP_OFF_RESERVED: usize = 48;
 /// Each ring starts on a 64-byte boundary after the header.
 pub(crate) const QP_RING_ALIGN: usize = 64;
 
@@ -102,12 +118,19 @@ pub(crate) const ARENA_OFF_SIZE: usize = 8;
 
 // ---- attach handshake --------------------------------------------------------
 pub(crate) const ATTACH_REQ_MAGIC: u32 = 0x5152_4241; // "ABRQ"
-pub(crate) const ATTACH_REQ_BYTES: usize = 16;
+pub(crate) const ATTACH_REQ_BYTES: usize = 20;
+/// D13: what an older host reads of the request.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "host-owned or reserved; held to the table")
+)]
+pub(crate) const ATTACH_REQ_V0_BYTES: usize = 16;
 pub(crate) const ATTACH_REQ_OFF_MAGIC: usize = 0;
 pub(crate) const ATTACH_REQ_OFF_WIRE_MIN: usize = 4;
 pub(crate) const ATTACH_REQ_OFF_WIRE_MAX: usize = 6;
 pub(crate) const ATTACH_REQ_OFF_CLASS: usize = 8;
 pub(crate) const ATTACH_REQ_OFF_REF: usize = 12;
+pub(crate) const ATTACH_REQ_OFF_CAPABILITIES: usize = 16;
 pub(crate) const ATTACH_REPLY_MAGIC: u32 = 0x5052_4241; // "ABRP"
 pub(crate) const ATTACH_REPLY_BYTES: usize = 48;
 pub(crate) const ATTACH_REPLY_OFF_MAGIC: usize = 0;
@@ -117,11 +140,8 @@ pub(crate) const ATTACH_REPLY_OFF_WIRE: usize = 12;
 pub(crate) const ATTACH_REPLY_OFF_SLOT: usize = 16;
 pub(crate) const ATTACH_REPLY_OFF_INLINE: usize = 20;
 pub(crate) const ATTACH_REPLY_OFF_QUEUE_CAP: usize = 24;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "host-owned or reserved; held to the table")
-)]
-pub(crate) const ATTACH_REPLY_OFF_RESERVED: usize = 28;
+/// D13, formerly reserved: the requested capabilities the host granted.
+pub(crate) const ATTACH_REPLY_OFF_CAPABILITIES: usize = 28;
 pub(crate) const ATTACH_REPLY_OFF_ARENA: usize = 32;
 pub(crate) const ATTACH_REPLY_OFF_EPOCH: usize = 40;
 pub(crate) const ATTACH_STATUS_OK: u32 = 0;
@@ -129,15 +149,39 @@ pub(crate) const ATTACH_STATUS_DENIED_POLICY: u32 = 1;
 pub(crate) const ATTACH_STATUS_DENIED_VERSION: u32 = 2;
 pub(crate) const ATTACH_STATUS_DENIED_NOSLOT: u32 = 3;
 pub(crate) const ATTACH_STATUS_PROTOCOL: u32 = 4;
-/// A successful attach carries exactly these descriptors, in this order.
+/// A successful attach carries exactly these descriptors, in this order. A
+/// doorbell grant (D13) adds the host doorbell and the client's own.
 pub(crate) const ATTACH_FDS: usize = 3;
+pub(crate) const ATTACH_FDS_DOORBELL: usize = 5;
 pub(crate) const ATTACH_FD_CONTROL: usize = 0;
 pub(crate) const ATTACH_FD_ARENA: usize = 1;
 pub(crate) const ATTACH_FD_QPAIR: usize = 2;
+pub(crate) const ATTACH_FD_HOST_DOORBELL: usize = 3;
+pub(crate) const ATTACH_FD_CLIENT_DOORBELL: usize = 4;
+/// Asks for, and grants, a doorbell pair (D13).
+pub(crate) const ATTACH_CAP_DOORBELL: u32 = 0x1;
+/// D15: the host releases the slot when the client's process exits.
+pub(crate) const ATTACH_CAP_PROCESS_LIVENESS: u32 = 0x2;
+/// D15: the heartbeat a detaching client leaves; the host releases the slot.
+pub(crate) const HEARTBEAT_DETACHED: u64 = u64::MAX;
 
 // ---- lease-release payload (D12) ---------------------------------------------
 pub(crate) const LEASE_RELEASE_OFF_LEASE: usize = 0;
 pub(crate) const LEASE_RELEASE_OFF_GENERATION: usize = 4;
+
+// ---- overflow payload (D6; decoded by subscribers since D14) -------------------
+pub(crate) const OVERFLOW_LEN: usize = 16;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "host-owned or reserved; held to the table")
+)]
+pub(crate) const OVERFLOW_OFF_SHED_SEQ: usize = 0;
+pub(crate) const OVERFLOW_OFF_SHED_KIND: usize = 8;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "host-owned or reserved; held to the table")
+)]
+pub(crate) const OVERFLOW_OFF_DST_SLOT: usize = 12;
 
 // ---- AMOD envelope -------------------------------------------------------------
 pub(crate) const AMOD_OFF_MAGIC: usize = 0;
@@ -193,8 +237,11 @@ mod tests {
             ("control.off.host_epoch", CTL_OFF_EPOCH as u64),
             ("control.off.host_heartbeat", CTL_OFF_HEARTBEAT as u64),
             ("control.off.lease_view_off", CTL_OFF_LEASE_VIEW_OFF as u64),
+            ("control.off.host_waiting", CTL_OFF_HOST_WAITING as u64),
+            ("control.off.reserved2", CTL_OFF_RESERVED2 as u64),
             ("control.off.reserved1", CTL_OFF_RESERVED1 as u64),
             ("control.flag.lease_view", CTL_F_LEASE_VIEW.into()),
+            ("control.flag.doorbell", CTL_F_DOORBELL.into()),
             ("lease_view.slots", LEASE_VIEW_SLOTS as u64),
             ("lease_view.entry.size", LEASE_VIEW_ENTRY as u64),
             (
@@ -215,6 +262,8 @@ mod tests {
             ("qpair.off.inbound_off", QP_OFF_INBOUND as u64),
             ("qpair.off.outbound_off", QP_OFF_OUTBOUND as u64),
             ("qpair.off.client_heartbeat", QP_OFF_HEARTBEAT as u64),
+            ("qpair.off.client_waiting", QP_OFF_CLIENT_WAITING as u64),
+            ("qpair.off.reserved0", QP_OFF_RESERVED0 as u64),
             ("qpair.off.reserved", QP_OFF_RESERVED as u64),
             ("qpair.ring_align", QP_RING_ALIGN as u64),
             ("ring.magic", RING_MAGIC.into()),
@@ -250,6 +299,11 @@ mod tests {
                 "attach_request.off.principal_ref",
                 ATTACH_REQ_OFF_REF as u64,
             ),
+            (
+                "attach_request.off.capabilities",
+                ATTACH_REQ_OFF_CAPABILITIES as u64,
+            ),
+            ("attach_request.v0_size", ATTACH_REQ_V0_BYTES as u64),
             ("attach_reply.magic", ATTACH_REPLY_MAGIC.into()),
             ("attach_reply.size", ATTACH_REPLY_BYTES as u64),
             ("attach_reply.off.magic", ATTACH_REPLY_OFF_MAGIC as u64),
@@ -269,8 +323,8 @@ mod tests {
                 ATTACH_REPLY_OFF_QUEUE_CAP as u64,
             ),
             (
-                "attach_reply.off.reserved",
-                ATTACH_REPLY_OFF_RESERVED as u64,
+                "attach_reply.off.capabilities",
+                ATTACH_REPLY_OFF_CAPABILITIES as u64,
             ),
             ("attach_reply.off.arena_size", ATTACH_REPLY_OFF_ARENA as u64),
             ("attach_reply.off.host_epoch", ATTACH_REPLY_OFF_EPOCH as u64),
@@ -292,12 +346,27 @@ mod tests {
             ("attach.fd.control", ATTACH_FD_CONTROL as u64),
             ("attach.fd.arena", ATTACH_FD_ARENA as u64),
             ("attach.fd.qpair", ATTACH_FD_QPAIR as u64),
+            ("attach.descriptors_doorbell", ATTACH_FDS_DOORBELL as u64),
+            ("attach.fd.host_doorbell", ATTACH_FD_HOST_DOORBELL as u64),
+            (
+                "attach.fd.client_doorbell",
+                ATTACH_FD_CLIENT_DOORBELL as u64,
+            ),
+            ("attach.cap.doorbell", ATTACH_CAP_DOORBELL.into()),
+            (
+                "attach.cap.process_liveness",
+                ATTACH_CAP_PROCESS_LIVENESS.into(),
+            ),
             ("lease_release.size", LEASE_RELEASE_LEN as u64),
             ("lease_release.off.lease_id", LEASE_RELEASE_OFF_LEASE as u64),
             (
                 "lease_release.off.generation",
                 LEASE_RELEASE_OFF_GENERATION as u64,
             ),
+            ("overflow.size", OVERFLOW_LEN as u64),
+            ("overflow.off.shed_seq", OVERFLOW_OFF_SHED_SEQ as u64),
+            ("overflow.off.shed_kind", OVERFLOW_OFF_SHED_KIND as u64),
+            ("overflow.off.dst_slot", OVERFLOW_OFF_DST_SLOT as u64),
             ("amod.magic", MODULE_MESSAGE_MAGIC.into()),
             ("amod.size", MODULE_MESSAGE_HEADER_LEN as u64),
             ("amod.off.magic", AMOD_OFF_MAGIC as u64),

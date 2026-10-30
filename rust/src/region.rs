@@ -18,6 +18,7 @@ use crate::layout::{
     LEASE_VIEW_SLOTS, QP_BYTES, QP_MAGIC, QP_OFF_CAP, QP_OFF_CONTROL_LOST, QP_OFF_HEARTBEAT,
     QP_OFF_INBOUND, QP_OFF_MAGIC, QP_OFF_OUTBOUND, QP_OFF_SLOT, QP_RING_ALIGN, SPEC_VERSION,
 };
+use crate::layout::{CTL_F_DOORBELL, CTL_OFF_HOST_WAITING, QP_OFF_CLIENT_WAITING};
 
 fn align64(n: usize) -> usize {
     (n + QP_RING_ALIGN - 1) & !(QP_RING_ALIGN - 1)
@@ -44,6 +45,11 @@ fn load_u32(base: NonNull<u8>, off: usize, order: Ordering) -> u32 {
 fn load_u64(base: NonNull<u8>, off: usize, order: Ordering) -> u64 {
     // SAFETY: as load_u32, with 8-aligned offsets.
     unsafe { (*(base.as_ptr().add(off) as *const AtomicU64)).load(order) }
+}
+
+fn store_u32(base: NonNull<u8>, off: usize, value: u32, order: Ordering) {
+    // SAFETY: as load_u32; the queue-pair mapping is writable.
+    unsafe { (*(base.as_ptr().add(off) as *const AtomicU32)).store(value, order) }
 }
 
 fn store_u64(base: NonNull<u8>, off: usize, value: u64, order: Ordering) {
@@ -183,6 +189,17 @@ impl Control {
         Some(offset)
     }
 
+    /// Whether the host keeps a doorbell (D13).
+    pub(crate) fn has_doorbell(&self) -> bool {
+        load_u32(self.base, CTL_OFF_FLAGS, Ordering::Acquire) & CTL_F_DOORBELL != 0
+    }
+
+    /// The host's D13 waiting flag. Sequentially consistent, pairing with the
+    /// host's store before it re-checks the rings.
+    pub(crate) fn host_waiting(&self) -> bool {
+        load_u32(self.base, CTL_OFF_HOST_WAITING, Ordering::SeqCst) != 0
+    }
+
     /// The current host epoch; a change means the host restarted.
     pub(crate) fn epoch(&self) -> u64 {
         load_u64(self.base, CTL_OFF_EPOCH, Ordering::Acquire)
@@ -257,6 +274,17 @@ impl QueuePair {
     /// The sticky flag the host sets when a control-class event was shed.
     pub(crate) fn control_lost(&self) -> bool {
         load_u32(self.base, QP_OFF_CONTROL_LOST, Ordering::Acquire) != 0
+    }
+
+    /// Store this client's D13 waiting flag, sequentially consistent so it
+    /// pairs with the host's load after it commits.
+    pub(crate) fn set_client_waiting(&self, waiting: bool) {
+        store_u32(
+            self.base,
+            QP_OFF_CLIENT_WAITING,
+            u32::from(waiting),
+            Ordering::SeqCst,
+        );
     }
 
     /// Advance the liveness value the host reads to decide on a reap.

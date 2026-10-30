@@ -18,11 +18,12 @@ pub mod module_adapter;
 pub mod module_caller;
 pub mod module_protocol;
 pub mod module_runtime;
+pub mod notify;
 mod region;
 mod ring;
 mod sys;
 pub mod wire;
 
-pub use client::{Attachment, Client, Event, KeepAlive};
+pub use client::{Attachment, Client, Event, KeepAlive, Waker};
 pub use error::{AttachStatus, RingError};
 pub use sys::monotonic_ns;

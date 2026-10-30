@@ -94,6 +94,9 @@ fn main() {
             .handler(),
         ),
         max_idle_poll: Duration::ZERO,
+        notify: None,
+        overflow: None,
+        started: None,
         after_attach: None,
     };
     if let Err(e) = run_module_process(config, &shutdown) {

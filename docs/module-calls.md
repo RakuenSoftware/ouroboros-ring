@@ -112,7 +112,17 @@ int main(int argc, char **argv)
   can trust who called it.
 - **Embedding.** `ouro_module_service_run` serves the same stages over a client
   the caller already attached, without installing signal handlers. A host uses
-  it to serve stages from inside its own process.
+  it to serve stages from inside its own process. The loop sleeps on the
+  client's doorbell while idle, so whoever makes `stop()` true calls
+  `ouro_client_interrupt` to have it noticed at once.
+- **Notifications.** A module that subscribes to kinds sets `notify` (and
+  `overflow`, for the kinds it missed) in its configuration
+  ([D14](../spec/decisions.md#d14-notifications-reach-module-processes-and-callers)).
+  They run on the polling thread with a payload valid only for the call. Go's
+  `Notify` and `Overflow`, and Rust's `notify` and `overflow`, run on a delivery
+  thread instead, in ring order, and report a kind as missed if the handler
+  falls more than 4096 notifications behind. A subscriber that keeps state
+  derived from another component's treats an overflow as "re-read it".
 
 The Go (`ring.RunModuleProcess`) and Rust (`run_module_process`) runtimes follow
 the same contract, and a module in either is held to the same C harness
@@ -160,7 +170,12 @@ part of the contract.
 Go has `ring.NewModuleCaller` and, for many goroutines sharing one client,
 `ring.NewConcurrentModuleCaller`; Rust has `ModuleCaller`. All three map
 outcomes to the same results, which `OURO_TEST_MODULE_CALLER` checks across
-languages.
+languages. Every caller sleeps on its client's doorbell while it waits for a
+reply. `ConcurrentModuleCaller` also delivers the notifications its slot
+subscribes to (`OnNotification` and `OnOverflow`, each per kind, so subscribers
+sharing one caller each hear about their own) and publishes on that slot
+(`Publish`), so one long-lived process can call, listen and announce over one
+attachment.
 
 ## Statuses at a glance
 

@@ -34,7 +34,8 @@ func ConnectClient(ctx context.Context, socketPath string, principalClass, princ
 		if err == nil {
 			client, attachErr := AttachAs(fd, principalClass, principalRef)
 			unix.Close(fd)
-			if attachErr == nil {
+			// D15: a host that watches this process needs no heartbeat.
+			if attachErr == nil && !client.HasProcessLiveness() {
 				keepAlive(ctx, client, clientHeartbeatInterval)
 			}
 			return client, attachErr

@@ -69,6 +69,9 @@ pub enum RingError {
     Epoch,
     /// The module process configuration is invalid.
     Config(&'static str),
+    /// The host granted no doorbell (it predates D13); the caller keeps its
+    /// own backoff.
+    NoDoorbell,
 }
 
 impl fmt::Display for RingError {
@@ -82,6 +85,7 @@ impl fmt::Display for RingError {
             RingError::Payload => f.write_str("bus: payload too large for inline budget"),
             RingError::Epoch => f.write_str("bus: host restarted (epoch changed)"),
             RingError::Config(m) => write!(f, "bus: invalid module process configuration: {m}"),
+            RingError::NoDoorbell => f.write_str("bus: host granted no doorbell"),
         }
     }
 }

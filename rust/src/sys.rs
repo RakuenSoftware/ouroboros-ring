@@ -151,6 +151,98 @@ pub(crate) fn recv_with_fds(
     Ok((n, fds, truncated))
 }
 
+/// Add one to an eventfd counter (D13). EAGAIN means the counter is already
+/// non-zero, so the sleeper wakes anyway.
+pub(crate) fn eventfd_ring(fd: RawFd) {
+    let one = 1u64.to_ne_bytes();
+    loop {
+        // SAFETY: an 8-byte write of a local buffer.
+        let n = unsafe { libc::write(fd, one.as_ptr() as *const libc::c_void, one.len()) };
+        if n >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return;
+        }
+    }
+}
+
+/// Wait up to `timeout_ms` (negative: forever) for `fd` to be readable, then
+/// reset its eventfd counter, also ending when the process behind `pidfd`
+/// exits (D15). A signal ends the wait as a timeout would. Reports whether it
+/// was woken, and whether that process is gone.
+pub(crate) fn eventfd_wait_or_exit(
+    fd: RawFd,
+    pidfd: Option<RawFd>,
+    timeout_ms: i32,
+) -> io::Result<(bool, bool)> {
+    let mut p = [
+        libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: pidfd.unwrap_or(-1),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    let count = if pidfd.is_some() { 2 } else { 1 };
+    // SAFETY: `count` valid pollfds.
+    let n = unsafe { libc::poll(p.as_mut_ptr(), count, timeout_ms) };
+    if n < 0 {
+        let err = io::Error::last_os_error();
+        return if err.kind() == io::ErrorKind::Interrupted {
+            Ok((false, false))
+        } else {
+            Err(err)
+        };
+    }
+    if p[0].revents & libc::POLLIN != 0 {
+        let mut count = [0u8; 8];
+        // SAFETY: an 8-byte read into a local buffer; the fd is non-blocking.
+        let _ = unsafe { libc::read(fd, count.as_mut_ptr() as *mut libc::c_void, count.len()) };
+    }
+    Ok((n > 0, pidfd.is_some() && p[1].revents != 0))
+}
+
+/// A process handle on the peer of a connected Unix socket (D15), or `None`
+/// where the platform has none.
+pub(crate) fn peer_process_handle(sock: BorrowedFd<'_>) -> Option<OwnedFd> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: SO_PEERCRED fills a ucred of the given size.
+        let rc = unsafe {
+            libc::getsockopt(
+                sock.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut libc::ucred as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if rc != 0 || cred.pid <= 0 {
+            return None;
+        }
+        // SAFETY: pidfd_open takes a pid and flags and returns a new descriptor.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, cred.pid, 0) };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: a descriptor the kernel just returned, owned by nothing else.
+        Some(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = sock;
+        None
+    }
+}
+
 /// The size of the object behind `fd`.
 pub(crate) fn fd_size(fd: BorrowedFd<'_>) -> io::Result<u64> {
     // SAFETY: stat is plain old data.

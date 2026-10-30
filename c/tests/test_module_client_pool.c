@@ -179,6 +179,7 @@ int main(void)
    wait_for_held(0);
 
    atomic_store(&svc.stop, 1);
+   ouro_client_interrupt(&svc.bus); /* the loop sleeps on its doorbell (D13) */
    pthread_join(st, NULL);
    atomic_store(&pump_stop, 1);
    pthread_join(pt, NULL);

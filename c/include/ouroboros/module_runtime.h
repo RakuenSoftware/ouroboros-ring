@@ -48,6 +48,13 @@ typedef struct
    size_t stage_count;
    ouro_module_handler_fn handler;
    void *user_data;
+   /* D14. A notification of a kind this slot subscribes to, and an overflow
+    * naming a kind it missed. Both run on the polling thread with user_data;
+    * the payload is valid only for the call, so copy what you keep, and do not
+    * block. NULL discards, as before D14. */
+   void (*notify)(uint32_t event_kind, const uint8_t *payload, uint32_t payload_len,
+                  void *user_data);
+   void (*overflow)(uint32_t shed_kind, void *user_data);
 } ouro_module_process_config_t;
 
 /* True after a ring cancel for this correlation or once its absolute monotonic
@@ -59,7 +66,10 @@ const atomic_int *ouro_module_invocation_cancel_flag(const ouro_module_invocatio
 
 /* Embedded host service. Borrows one exclusively owned attached client and an
  * immutable stage table. Installs NO signals and does not detach the client.
- * stop() ends admission, cancels and joins every worker before returning. */
+ * stop() ends admission, cancels and joins every worker before returning. The
+ * loop sleeps on the client's doorbell while idle (D13), so whoever makes stop()
+ * true calls ouro_client_interrupt(client) to have it noticed at once; otherwise
+ * it is noticed at the next wakeup, within five seconds. */
 typedef int (*ouro_module_service_stop_fn)(void *context);
 int ouro_module_service_run(ouro_client_t *client, const ouro_module_process_config_t *config,
                              ouro_module_service_stop_fn stop, void *stop_context);

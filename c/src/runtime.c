@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -33,6 +34,7 @@ struct ouro_runtime
    ouro_host_t *host;
    pthread_mutex_t *host_lock;
    int listener_fd;
+   int stop_fd; /* written by ouro_runtime_stop; the accept loop sleeps on it */
    pthread_t thread;
    atomic_int stop;
    char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
@@ -208,6 +210,10 @@ static ouro_attach_status_t runtime_bind(void *ctx, ouro_host_t *host, uint32_t 
          goto denied;
    process_handle_close(&runtime->slot_pidfd[slot]);
    runtime->slot_pidfd[slot] = peer_pidfd;
+   /* D15: the accept loop watches this handle and releases the slot the moment
+    * the process exits, so the client need not heartbeat. */
+   if (peer_pidfd >= 0)
+      (void)ouro_host_bind_process(host, slot);
    return OURO_ATTACH_OK;
 
 denied:
@@ -222,29 +228,75 @@ static void connection_timeouts(int fd)
    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 }
 
+/* D15: release the slots whose process has exited. A handle for a slot that
+ * is no longer admitted is closed here too, or it would stay readable. */
+static void release_exited(ouro_runtime_t *runtime, const struct pollfd *watched,
+                           const uint32_t *slots, size_t count)
+{
+   pthread_mutex_lock(runtime->host_lock);
+   int released = 0;
+   for (size_t i = 0; i < count; ++i)
+   {
+      uint32_t slot = slots[i];
+      if (!watched[i].revents || runtime->slot_pidfd[slot] != watched[i].fd ||
+          !process_handle_exited(watched[i].fd))
+         continue;
+      if (slot < runtime->host->cfg.max_slots && runtime->host->slots[slot].in_use &&
+          ouro_host_release_slot(runtime->host, slot) == OURO_HOST_OK)
+         released = 1;
+      process_handle_close(&runtime->slot_pidfd[slot]);
+   }
+   pthread_mutex_unlock(runtime->host_lock);
+   if (released)
+      ouro_host_wake(runtime->host); /* the owner re-reads the directory */
+}
+
 static void *accept_main(void *arg)
 {
    ouro_runtime_t *runtime = arg;
    const struct timespec idle = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
    while (!atomic_load_explicit(&runtime->stop, memory_order_acquire))
    {
+      /* Sleep until a client connects, an admitted process exits (D15), or stop
+       * is asked for (D13): an idle listener does not wake. */
+      struct pollfd ready[2 + OURO_ARENA_MAX_SLOTS];
+      uint32_t slots[OURO_ARENA_MAX_SLOTS];
+      size_t watched = 0;
+      ready[0] = (struct pollfd){.fd = runtime->listener_fd, .events = POLLIN};
+      ready[1] = (struct pollfd){.fd = runtime->stop_fd, .events = POLLIN};
+      pthread_mutex_lock(runtime->host_lock);
+      for (uint32_t i = 0; i < OURO_ARENA_MAX_SLOTS; ++i)
+         if (runtime->slot_pidfd[i] >= 0)
+         {
+            ready[2 + watched] = (struct pollfd){.fd = runtime->slot_pidfd[i], .events = POLLIN};
+            slots[watched++] = i;
+         }
+      pthread_mutex_unlock(runtime->host_lock);
+      if (poll(ready, (nfds_t)(2 + watched), -1) < 0 && errno != EINTR)
+         nanosleep(&idle, NULL); /* a poll failure is retried, not spun on */
+      if (atomic_load_explicit(&runtime->stop, memory_order_acquire))
+         break;
+      if (watched)
+         release_exited(runtime, ready + 2, slots, watched);
+      if (!(ready[0].revents & POLLIN))
+         continue;
       int fd = -1;
       if (ouro_endpoint_accept(runtime->listener_fd, &fd) != 0)
       {
-         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-         {
-            nanosleep(&idle, NULL);
-            continue;
-         }
-         if (!atomic_load_explicit(&runtime->stop, memory_order_acquire))
+         /* EAGAIN: another wakeup took the connection, or it went away. */
+         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
             nanosleep(&idle, NULL);
          continue;
       }
       connection_timeouts(fd);
       pthread_mutex_lock(runtime->host_lock);
-      (void)ouro_host_serve_attach(runtime->host, fd);
+      int admitted = ouro_host_serve_attach(runtime->host, fd) == OURO_HOST_OK;
       pthread_mutex_unlock(runtime->host_lock);
       (void)ouro_endpoint_close(&fd);
+      /* An owner sleeping without a reap timer must look again: the new client
+       * may be one only heartbeats can account for. */
+      if (admitted)
+         ouro_host_wake(runtime->host);
    }
    return NULL;
 }
@@ -284,6 +336,12 @@ ouro_runtime_t *ouro_runtime_start(ouro_host_t *host, pthread_mutex_t *host_lock
    if (!runtime)
       return NULL;
    runtime->listener_fd = -1;
+   runtime->stop_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+   if (runtime->stop_fd < 0)
+   {
+      free(runtime);
+      return NULL;
+   }
    for (uint32_t i = 0; i < OURO_ARENA_MAX_SLOTS; ++i)
       runtime->slot_pidfd[i] = -1;
    runtime->host = host;
@@ -298,12 +356,14 @@ ouro_runtime_t *ouro_runtime_start(ouro_host_t *host, pthread_mutex_t *host_lock
        strlen(config->socket_path) >= sizeof(runtime->socket_path))
    {
       errno = ENAMETOOLONG;
+      close(runtime->stop_fd);
       free(runtime);
       return NULL;
    }
    if (listen_fresh(runtime->socket_path, config->socket_mode, config->backlog,
                     &runtime->listener_fd) != 0)
    {
+      close(runtime->stop_fd);
       free(runtime);
       return NULL;
    }
@@ -321,6 +381,7 @@ fail:
    ouro_host_set_attach_hook(host, NULL, NULL);
    ouro_endpoint_close(&runtime->listener_fd);
    (void)ouro_endpoint_remove(runtime->socket_path);
+   close(runtime->stop_fd);
    free(runtime);
    return NULL;
 }
@@ -331,9 +392,12 @@ void ouro_runtime_stop(ouro_runtime_t **runtime_ptr)
       return;
    ouro_runtime_t *runtime = *runtime_ptr;
    atomic_store_explicit(&runtime->stop, 1, memory_order_release);
-   /* The listener is nonblocking, so the accept loop observes stop within one
-    * short idle tick. Join before writing listener_fd to avoid racing the
-    * accept thread's read of that field. */
+   /* The accept loop sleeps on stop_fd as well as the listener, so this wakes
+    * it at once. Join before writing listener_fd to avoid racing the accept
+    * thread's read of that field. */
+   uint64_t one = 1;
+   while (write(runtime->stop_fd, &one, sizeof one) < 0 && errno == EINTR)
+      ;
    pthread_join(runtime->thread, NULL);
    ouro_endpoint_close(&runtime->listener_fd);
    pthread_mutex_lock(runtime->host_lock);
@@ -343,8 +407,14 @@ void ouro_runtime_stop(ouro_runtime_t **runtime_ptr)
       process_handle_close(&runtime->slot_pidfd[i]);
    pthread_mutex_unlock(runtime->host_lock);
    (void)ouro_endpoint_remove(runtime->socket_path);
+   close(runtime->stop_fd);
    free(runtime);
    *runtime_ptr = NULL;
+}
+
+int ouro_runtime_maintenance_due(const ouro_runtime_t *runtime)
+{
+   return runtime && runtime->stale_after_ns != 0 && ouro_host_heartbeat_slots(runtime->host) > 0;
 }
 
 uint32_t ouro_runtime_maintain(ouro_runtime_t *runtime, uint64_t now_ns)

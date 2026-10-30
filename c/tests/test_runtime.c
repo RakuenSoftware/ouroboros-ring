@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include "support/tmpdir.h"
 
@@ -36,6 +37,83 @@ static int crash_client(const char *socket_path)
       return 2;
    for (;;)
       pause();
+}
+
+#define HOSTED_REF 10U
+
+/* D15: a host in its own process, for a client to watch exit. */
+static int run_host(const char *socket_path)
+{
+   char executable[PATH_MAX];
+   if (!realpath("/proc/self/exe", executable))
+      return 2;
+   ouro_runtime_grant_t grant = {.principal_class = 1,
+                                 .principal_ref = HOSTED_REF,
+                                 .uid = OURO_RUNTIME_SELF_UID,
+                                 .executable = executable};
+   ouro_host_config_t config = {.max_slots = 4,
+                                .slot_size = 512,
+                                .inline_budget = 400,
+                                .queue_capacity = 8,
+                                .arena_size = 16384};
+   static ouro_host_t host;
+   static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+   if (ouro_host_create(&host, &config, NULL, NULL) != OURO_HOST_OK)
+      return 2;
+   ouro_runtime_config_t runtime_config = {.socket_path = socket_path,
+                                           .socket_mode = 0600,
+                                           .backlog = 4,
+                                           .stale_after_ns = 60000000000ULL,
+                                           .grants = &grant,
+                                           .grant_count = 1};
+   if (!ouro_runtime_start(&host, &lock, &runtime_config) || write(STDOUT_FILENO, "R", 1) != 1)
+      return 2;
+   for (;;)
+      pause();
+}
+
+/* D15: a client asleep with no timeout wakes when its host's process exits,
+ * and sees it as an epoch change, so it never waits on a host that is gone. */
+static void test_host_exit_wakes_client(const char *directory, const char *executable)
+{
+   char socket_path[PATH_MAX];
+   assert(snprintf(socket_path, sizeof socket_path, "%s/hosted.sock", directory) > 0);
+   int ready[2];
+   assert(pipe(ready) == 0);
+   pid_t hosting = fork();
+   assert(hosting >= 0);
+   if (hosting == 0)
+   {
+      close(ready[0]);
+      assert(dup2(ready[1], STDOUT_FILENO) == STDOUT_FILENO);
+      close(ready[1]);
+      execl(executable, executable, "--host", socket_path, (char *)NULL);
+      _exit(127);
+   }
+   close(ready[1]);
+   char marker = 0;
+   assert(read(ready[0], &marker, 1) == 1 && marker == 'R');
+   close(ready[0]);
+
+   ouro_client_t client;
+   assert(attach(socket_path, HOSTED_REF, &client) == OURO_CLIENT_OK);
+   assert(ouro_client_liveness_watched(&client));
+   assert(!ouro_client_epoch_changed(&client));
+   pid_t killer = fork();
+   assert(killer >= 0);
+   if (killer == 0)
+   {
+      nanosleep(&(struct timespec){.tv_nsec = 200000000}, NULL);
+      kill(hosting, SIGKILL);
+      _exit(0);
+   }
+   assert(ouro_client_wait(&client, -1) == 1);
+   assert(ouro_client_epoch_changed(&client));
+   int status = 0;
+   assert(waitpid(killer, &status, 0) == killer);
+   assert(waitpid(hosting, &status, 0) == hosting && WIFSIGNALED(status));
+   ouro_client_detach(&client);
+   unlink(socket_path);
 }
 
 /* Refused role refs are stricter than the grant file. Both role grants
@@ -122,6 +200,8 @@ int main(int argc, char **argv)
 {
    if (argc == 3 && strcmp(argv[1], "--crash-client") == 0)
       return crash_client(argv[2]);
+   if (argc == 3 && strcmp(argv[1], "--host") == 0)
+      return run_host(argv[2]);
 
    char directory[256];
    snprintf(directory, sizeof directory, "%s/ouroboros-ring-runtime-XXXXXX", test_tmpdir());
@@ -191,6 +271,8 @@ int main(int argc, char **argv)
    assert(attach(socket_path, 7, &publisher) == OURO_CLIENT_OK);
    assert(attach(socket_path, 8, &subscriber) == OURO_CLIENT_OK);
    assert(attach(socket_path, 99, &denied) == OURO_CLIENT_DENIED);
+   /* D15: the runtime holds a process handle for each client it admits. */
+   assert(ouro_client_process_liveness(&publisher) && ouro_client_process_liveness(&subscriber));
 
    static const char payload[] = "authorized";
    assert(ouro_client_publish(&publisher, TEST_KIND, payload, sizeof(payload)) == OURO_CLIENT_OK);
@@ -240,6 +322,18 @@ int main(int argc, char **argv)
    int status = 0;
    assert(waitpid(crashed, &status, 0) == crashed);
    assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+   /* D15: the exit alone releases the slot -- no heartbeat timeout, and no
+    * replacement attach needed to notice. */
+   int released = 0;
+   for (int i = 0; i < 200 && !released; ++i)
+   {
+      pthread_mutex_lock(&host_lock);
+      released = ouro_host_admitted(&host) == 2 && !ouro_host_kind_has_server(&host, TEST_SERVER_KIND);
+      pthread_mutex_unlock(&host_lock);
+      if (!released)
+         nanosleep(&(struct timespec){.tv_nsec = 10000000}, NULL);
+   }
+   assert(released);
    ouro_client_t replacement;
    assert(attach(socket_path, 9, &replacement) == OURO_CLIENT_OK);
    pthread_mutex_lock(&host_lock);
@@ -248,12 +342,22 @@ int main(int argc, char **argv)
    assert(ouro_host_kind_has_server(&host, TEST_SERVER_KIND_2));
    pthread_mutex_unlock(&host_lock);
    ouro_client_detach(&replacement);
+   /* D15: a detach is announced, so the next pump releases the slot even though
+    * its process (this one) is still alive. */
+   pthread_mutex_lock(&host_lock);
+   (void)ouro_host_pump(&host);
+   assert(ouro_host_admitted(&host) == 2);
+   pthread_mutex_unlock(&host_lock);
 
    uint64_t now = ouro_runtime_monotonic_ns();
-   ouro_client_heartbeat(&publisher, now);
-   ouro_client_heartbeat(&subscriber, now);
    pthread_mutex_lock(&host_lock);
+   /* D15: every admitted client is process-bound, so there is nothing for a
+    * reap timer to do, and clients that never heartbeat are not reaped even
+    * long past the stale window. */
+   assert(!ouro_runtime_maintenance_due(runtime));
    assert(ouro_runtime_maintain(runtime, now) == 0);
+   assert(ouro_runtime_maintain(runtime, now + 2 * runtime_config.stale_after_ns) == 0);
+   assert(ouro_host_admitted(&host) == 2);
    pthread_mutex_unlock(&host_lock);
 
    ouro_client_detach(&publisher);
@@ -262,6 +366,7 @@ int main(int argc, char **argv)
    ouro_host_destroy(&host);
    pthread_mutex_destroy(&host_lock);
    test_role_admission(socket_path, executable);
+   test_host_exit_wakes_client(directory, executable);
    assert(unlink(grant_path) == 0);
    assert(rmdir(policy_path) == 0);
    assert(rmdir(directory) == 0);
