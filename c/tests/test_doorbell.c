@@ -78,7 +78,11 @@ static void test_grant(void)
    must(ouro_host_doorbell_fd(&h) >= 0, "the host has a doorbell");
    ouro_client_t c;
    must(ouro_host_attach_local(&h, &c, 0) == OURO_CLIENT_OK, "attached");
-   must(c.have_doorbell && c.reply.capabilities == OURO_ATTACH_CAP_DOORBELL, "granted a doorbell");
+   must(c.have_doorbell && (c.reply.capabilities & OURO_ATTACH_CAP_DOORBELL), "granted a doorbell");
+   /* D15: an in-process client is process-bound and told so. */
+   must(c.reply.capabilities ==
+            (OURO_ATTACH_CAP_DOORBELL | OURO_ATTACH_CAP_PROCESS_LIVENESS),
+        "and process liveness, nothing else");
    must(ouro_client_doorbell_fd(&c) >= 0, "with its own descriptor");
    must((atomic_load(&c.ctl->flags) & OURO_CONTROL_F_DOORBELL) != 0, "the control region says so");
    ouro_client_detach(&c);
@@ -145,7 +149,8 @@ static void test_host_without_doorbell(void)
    ouro_client_t pub, sub;
    must(ouro_host_attach_local(&h, &pub, 0) == OURO_CLIENT_OK, "publisher attached");
    must(ouro_host_attach_local(&h, &sub, 0) == OURO_CLIENT_OK, "subscriber attached");
-   must(!sub.have_doorbell && sub.reply.capabilities == 0, "no doorbell is granted");
+   must(!sub.have_doorbell && !(sub.reply.capabilities & OURO_ATTACH_CAP_DOORBELL),
+        "no doorbell is granted");
    must(ouro_client_wait(&sub, 1000) == -1, "the client's wait says so at once");
    must(ouro_host_wait(&h, 1000) == -1, "and so does the host's");
    must(ouro_host_subscribe(&h, sub.reply.handle_id, 900) == OURO_HOST_OK, "subscribe");

@@ -246,6 +246,12 @@ ouro_host_result_t ouro_host_serve_attach_ex(ouro_host_t *h, int conn_fd, uint32
  * Platforms lacking same-process peer attestation fail closed. */
 ouro_host_result_t ouro_host_serve_attach_owned(ouro_host_t *h, int conn_fd);
 
+/* As ouro_host_serve_attach (or _owned when owned is set) for a peer the
+ * caller knows is in this process, as ouro_host_attach_local does. Such a slot
+ * cannot outlive the host, so it is process-bound (D15) and owes no heartbeat.
+ * Caller holds the host lock, as for the others. */
+ouro_host_result_t ouro_host_serve_attach_in_process(ouro_host_t *h, int conn_fd, int owned);
+
 /* Release one admitted slot immediately. Runtime owners use this only after an
  * OS-backed process handle proves the client has exited; ordinary liveness
  * remains heartbeat-reaped. The caller must hold the same host lock used for

@@ -787,8 +787,9 @@ expired.
   once, exactly as a reap would release it. Heartbeat reaping passes process-bound slots by, and
   `ouro_runtime_maintenance_due` reports whether any slot still needs the reap timer. An owner may
   sleep without one when none does; an admission wakes the host doorbell so it re-evaluates. A
-  client attached over the host's own socketpair (`ouro_host_serve_attach_owned`) lives in the
-  host's process, so it is process-bound by definition.
+  client attached in the host's own process (an owned socketpair, or `ouro_host_attach_local`,
+  through `ouro_host_serve_attach_in_process`) cannot outlive the host, so it is process-bound by
+  definition.
 - **Negotiation.** A D15 client sets bit 1 of the attach request's `capabilities`. The host grants
   it only for a process-bound slot. Granting it says "this slot's liveness is the process", so the
   client may stop heartbeating on a timer. A client that is not granted it keeps heartbeating, so an

@@ -325,7 +325,8 @@ static int host_owned_socketpair(int fd)
    return 0; /* No guessed identity on platforms without same-process attestation. */
 #endif
 }
-static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *slot_out, int owned)
+static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *slot_out, int owned,
+                                       int local)
 {
    if (slot_out)
       *slot_out = UINT32_MAX;
@@ -395,8 +396,9 @@ static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *sl
    s->principal_ref = req.principal_ref;
    s->last_heartbeat = 0;
    s->heartbeat_at = 0;
-   /* D15: a client on the host's own socketpair lives in the host's process. */
-   s->process_bound = owned;
+   /* D15: a client attached in the host's own process (owned, or through
+    * ouro_host_attach_local) cannot outlive it. */
+   s->process_bound = owned || local;
    h->admitted++;
 
    if (!owned && h->attach_hook)
@@ -478,15 +480,19 @@ static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *sl
 
 ouro_host_result_t ouro_host_serve_attach(ouro_host_t *h, int fd)
 {
-   return serve_attach(h, fd, NULL, 0);
+   return serve_attach(h, fd, NULL, 0, 0);
 }
 ouro_host_result_t ouro_host_serve_attach_ex(ouro_host_t *h, int fd, uint32_t *slot)
 {
-   return serve_attach(h, fd, slot, 0);
+   return serve_attach(h, fd, slot, 0, 0);
 }
 ouro_host_result_t ouro_host_serve_attach_owned(ouro_host_t *h, int fd)
 {
-   return serve_attach(h, fd, NULL, 1);
+   return serve_attach(h, fd, NULL, 1, 0);
+}
+ouro_host_result_t ouro_host_serve_attach_in_process(ouro_host_t *h, int fd, int owned)
+{
+   return serve_attach(h, fd, NULL, owned, 1);
 }
 
 /* ------------------------------------------------------------------ */

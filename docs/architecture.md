@@ -144,8 +144,9 @@ either, so an idle ring makes no wakeups at all
 - **Process handles** ([D15](../spec/decisions.md#d15-liveness-is-the-process-not-a-timer)).
   The runtime listener opens a handle (a pidfd on Linux) on each process it
   admits, and releases that process's slot the moment it exits. Such a slot is
-  granted process liveness and needs no heartbeat. A client likewise watches the
-  host's process, and the host's exit reads as an epoch change.
+  granted process liveness and needs no heartbeat, as is a client attached in
+  the host's own process (`ouro_host_attach_local`). A client likewise watches
+  the host's process, and the host's exit reads as an epoch change.
 - **Detach** is announced: a detaching client marks its heartbeat
   `OURO_HEARTBEAT_DETACHED` and rings the host, whose next pump releases the slot.
 - **Heartbeats** remain for a client the host holds no handle on. The client

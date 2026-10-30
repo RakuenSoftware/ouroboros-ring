@@ -18,10 +18,8 @@ struct serve_arg
 static void *serve_thread(void *p)
 {
    struct serve_arg *a = p;
-   if (a->owned)
-      (void)ouro_host_serve_attach_owned(a->h, a->fd);
-   else
-      (void)ouro_host_serve_attach(a->h, a->fd);
+   /* D15: this client is in the host's process, so it owes no heartbeat. */
+   (void)ouro_host_serve_attach_in_process(a->h, a->fd, a->owned);
    return NULL;
 }
 
