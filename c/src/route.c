@@ -200,6 +200,9 @@ static int has_room(const ouro_slot_t *d, int is_control)
 
 /* Encode a (seq/dst-stamped) frame and any inline payload into a destination
  * inbound slot. Assumes has_room already said yes. Returns 1 on success. */
+/* Defined in host.c (D13): wake a sleeping client after its rings moved. */
+void ouro_host_signal_slot(ouro_slot_t *s);
+
 static int put(ouro_host_t *h, ouro_slot_t *d, const ouro_frame_t *f, const uint8_t *inline_src)
 {
    uint8_t *slot = ouro_ring_produce_begin(&d->qpair.inbound);
@@ -216,6 +219,7 @@ static int put(ouro_host_t *h, ouro_slot_t *d, const ouro_frame_t *f, const uint
       memcpy(slot + out.payload_ref, inline_src, out.payload_len);
    }
    ouro_ring_produce_commit(&d->qpair.inbound);
+   ouro_host_signal_slot(d);
    return 1;
 }
 
@@ -804,6 +808,7 @@ uint32_t ouro_host_pump(ouro_host_t *h)
       ouro_slot_t *slot = &h->slots[s];
       if (!slot->in_use)
          continue;
+      uint64_t queued = ouro_ring_count(&slot->qpair.outbound);
 
       for (;;)
       {
@@ -902,6 +907,10 @@ uint32_t ouro_host_pump(ouro_host_t *h)
             break;
          }
       }
+      /* D13: a producer whose publish found its ring full may be asleep waiting
+       * for room. Routing can have reaped the slot, so check it is still live. */
+      if (slot->in_use && ouro_ring_count(&slot->qpair.outbound) < queued)
+         ouro_host_signal_slot(slot);
    }
    return routed;
 }

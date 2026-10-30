@@ -169,6 +169,7 @@ int main(void)
       nanosleep(&pause_one, NULL);
    assert(atomic_load(&a.entered));
    atomic_store(&a.stop, 1);
+   ouro_client_interrupt(&a.bus); /* the loop sleeps on its doorbell (D13) */
    pthread_join(at, NULL);
    pthread_join(ct, NULL);
    assert(!a.result && c.result == OURO_MODULE_CALL_CANCELLED);
@@ -176,6 +177,7 @@ int main(void)
                                   128 * 1024, &n, NULL, NULL) == OURO_MODULE_CALL_OK);
    assert(n == 5 && !memcmp(out, "alive", 5));
    atomic_store(&b.stop, 1);
+   ouro_client_interrupt(&b.bus);
    pthread_join(bt, NULL);
    assert(!b.result);
    atomic_store(&pump_stop, 1);

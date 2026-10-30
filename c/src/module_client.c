@@ -28,6 +28,26 @@ static int deadline_now(uint64_t deadline_ns)
    return now != 0 && ouro_module_deadline_expired(deadline_ns, now);
 }
 
+/* D13: sleep on the doorbell until the reply or room arrives, bounded by the
+ * deadline and, when a cancel callback must be checked, by a short slice. An
+ * older host grants no doorbell; then this is the old 1ms poll. */
+static void wait_for_ring(ouro_client_t *ring, uint64_t deadline_ns, int cancellable)
+{
+   int timeout_ms = cancellable ? 50 : 1000;
+   uint64_t now = monotonic_now_ns();
+   if (deadline_ns != 0 && now != 0)
+   {
+      uint64_t left_ms = deadline_ns > now ? (deadline_ns - now) / 1000000u + 1u : 0u;
+      if (left_ms < (uint64_t)timeout_ms)
+         timeout_ms = (int)left_ms;
+   }
+   if (ouro_client_wait(ring, timeout_ms) < 0)
+   {
+      const struct timespec idle = {.tv_sec = 0, .tv_nsec = 1000000};
+      nanosleep(&idle, NULL);
+   }
+}
+
 static uint64_t next_correlation(ouro_module_client_t *client)
 {
    uint64_t value = client->next_correlation++;
@@ -126,7 +146,6 @@ ouro_module_client_call(ouro_module_client_t *client, uint32_t event_kind, uint3
       goto done;
    }
    const uint64_t correlation = next_correlation(client);
-   const struct timespec idle = {.tv_sec = 0, .tv_nsec = 1000000};
    uint32_t request_offset = 0;
    int first_fragment = 1;
    int request_started = 0;
@@ -186,7 +205,7 @@ ouro_module_client_call(ouro_module_client_t *client, uint32_t event_kind, uint3
          }
          if (cancelled_now(cancelled, cancel_context) || deadline_now(deadline_ns))
             break;
-         nanosleep(&idle, NULL);
+         wait_for_ring(client->ring, deadline_ns, cancelled != NULL);
       }
       if (cancelled_now(cancelled, cancel_context) || deadline_now(deadline_ns))
          continue; /* the top of the loop sends cancellation and returns */
@@ -218,7 +237,7 @@ ouro_module_client_call(ouro_module_client_t *client, uint32_t event_kind, uint3
       ouro_client_result_t polled = ouro_client_poll(client->ring, &event);
       if (polled == OURO_CLIENT_EMPTY)
       {
-         nanosleep(&idle, NULL);
+         wait_for_ring(client->ring, deadline_ns, cancelled != NULL);
          continue;
       }
       if (polled != OURO_CLIENT_OK)

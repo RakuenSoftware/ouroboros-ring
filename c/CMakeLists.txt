@@ -94,12 +94,12 @@ if(BUILD_TESTING)
     set(OURO_TEST_layout src/region.c src/ring.c src/module_protocol.c)
     set(OURO_TEST_region src/region.c src/region_host.c src/ring.c)
     set(OURO_TEST_arena src/arena.c src/region.c src/ring.c)
-    foreach(name host route flow client capture local_attach runtime module_embedded_runtime
-                 module_client_pool)
+    foreach(name host route flow client capture local_attach doorbell runtime
+                 module_embedded_runtime module_client_pool)
         set(OURO_TEST_${name} ${OURO_ALL_SOURCES})
     endforeach()
     foreach(name ring wire endpoint module_protocol layout region arena host route flow client
-                 capture local_attach runtime module_embedded_runtime module_client_pool)
+                 capture local_attach doorbell runtime module_embedded_runtime module_client_pool)
         add_executable(test_${name} tests/test_${name}.c ${OURO_TEST_${name}})
         target_compile_features(test_${name} PRIVATE c_std_11)
         target_compile_options(test_${name} PRIVATE ${OURO_WARNINGS})

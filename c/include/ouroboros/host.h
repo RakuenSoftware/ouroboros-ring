@@ -21,6 +21,7 @@
 #ifndef OUROBOROS_HOST_H
 #define OUROBOROS_HOST_H 1
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <ouroboros/attach.h>
@@ -88,6 +89,10 @@ typedef struct
     * to exactly the set that was given a consumer ref — a subscriber that arrives
     * mid-retry holds no ref and must not receive an unreadable reference. */
    uint64_t arena_targets[OURO_ARENA_SLOT_WORDS];
+
+   /* D13: this client's doorbell, which the host writes and the client reads;
+    * -1 when the client asked for none. */
+   int doorbell_fd;
 } ouro_slot_t;
 
 /* Per-kind overflow policy (D5). Block is the safe default: a full destination
@@ -120,6 +125,12 @@ typedef struct
    uint32_t shed_kind;
    uint32_t dst_slot;
 } ouro_overflow_t;
+
+_Static_assert(sizeof(ouro_overflow_t) == OURO_OVERFLOW_LEN, "overflow body size");
+_Static_assert(offsetof(ouro_overflow_t, shed_kind) == OURO_OVERFLOW_OFF_SHED_KIND,
+               "overflow shed_kind offset");
+_Static_assert(offsetof(ouro_overflow_t, dst_slot) == OURO_OVERFLOW_OFF_DST_SLOT,
+               "overflow dst_slot offset");
 
 /* The block-held event discarded when its producer departs. The old control
  * event had no payload, so it proved that *something* was reaped but did not
@@ -188,6 +199,10 @@ typedef struct ouro_host
    void *tap_ctx;
    ouro_loss_fn loss;
    void *loss_ctx;
+
+   /* D13: the host doorbell every doorbell client writes; -1 if it could not be
+    * created, in which case no client is granted one and the caller polls. */
+   int doorbell_fd;
 } ouro_host_t;
 
 typedef enum
@@ -293,5 +308,22 @@ ouro_host_result_t ouro_host_set_kind_policy(ouro_host_t *h, uint32_t event_kind
  * Returns the number of events processed. Inline payloads only in this slice;
  * arena-payload delivery is a separate slice-4/6 integration. */
 uint32_t ouro_host_pump(ouro_host_t *h);
+
+/* D13. Sleep until a client publishes, a client consumes inbound room a blocked
+ * producer is waiting for, ouro_host_wake is called, or timeout_ms passes
+ * (negative waits indefinitely). Returns 1 when woken or when work was already
+ * waiting, 0 on timeout, and -1 when the host has no doorbell, in which case the
+ * caller keeps its own backoff. The caller must not hold a lock a client's
+ * progress depends on: clients run in other processes and never take it, but an
+ * in-process client would. */
+int ouro_host_wait(ouro_host_t *h, int timeout_ms);
+
+/* Wake a thread in ouro_host_wait, for work the rings do not show (shutdown,
+ * a timer). Safe from any thread. */
+void ouro_host_wake(ouro_host_t *h);
+
+/* The host doorbell, for a caller that multiplexes it with other descriptors.
+ * Readable means "pump". -1 when the host has none. */
+int ouro_host_doorbell_fd(const ouro_host_t *h);
 
 #endif /* OUROBOROS_HOST_H */

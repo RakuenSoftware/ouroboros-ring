@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -33,6 +34,7 @@ struct ouro_runtime
    ouro_host_t *host;
    pthread_mutex_t *host_lock;
    int listener_fd;
+   int stop_fd; /* written by ouro_runtime_stop; the accept loop sleeps on it */
    pthread_t thread;
    atomic_int stop;
    char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
@@ -228,15 +230,19 @@ static void *accept_main(void *arg)
    const struct timespec idle = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
    while (!atomic_load_explicit(&runtime->stop, memory_order_acquire))
    {
+      /* Sleep until a client connects or stop is asked for (D13): an idle
+       * listener does not wake. */
+      struct pollfd ready[2] = {{.fd = runtime->listener_fd, .events = POLLIN},
+                                {.fd = runtime->stop_fd, .events = POLLIN}};
+      if (poll(ready, 2, -1) < 0 && errno != EINTR)
+         nanosleep(&idle, NULL); /* a poll failure is retried, not spun on */
+      if (atomic_load_explicit(&runtime->stop, memory_order_acquire))
+         break;
       int fd = -1;
       if (ouro_endpoint_accept(runtime->listener_fd, &fd) != 0)
       {
-         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-         {
-            nanosleep(&idle, NULL);
-            continue;
-         }
-         if (!atomic_load_explicit(&runtime->stop, memory_order_acquire))
+         /* EAGAIN: another wakeup took the connection, or it went away. */
+         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
             nanosleep(&idle, NULL);
          continue;
       }
@@ -284,6 +290,12 @@ ouro_runtime_t *ouro_runtime_start(ouro_host_t *host, pthread_mutex_t *host_lock
    if (!runtime)
       return NULL;
    runtime->listener_fd = -1;
+   runtime->stop_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+   if (runtime->stop_fd < 0)
+   {
+      free(runtime);
+      return NULL;
+   }
    for (uint32_t i = 0; i < OURO_ARENA_MAX_SLOTS; ++i)
       runtime->slot_pidfd[i] = -1;
    runtime->host = host;
@@ -298,12 +310,14 @@ ouro_runtime_t *ouro_runtime_start(ouro_host_t *host, pthread_mutex_t *host_lock
        strlen(config->socket_path) >= sizeof(runtime->socket_path))
    {
       errno = ENAMETOOLONG;
+      close(runtime->stop_fd);
       free(runtime);
       return NULL;
    }
    if (listen_fresh(runtime->socket_path, config->socket_mode, config->backlog,
                     &runtime->listener_fd) != 0)
    {
+      close(runtime->stop_fd);
       free(runtime);
       return NULL;
    }
@@ -321,6 +335,7 @@ fail:
    ouro_host_set_attach_hook(host, NULL, NULL);
    ouro_endpoint_close(&runtime->listener_fd);
    (void)ouro_endpoint_remove(runtime->socket_path);
+   close(runtime->stop_fd);
    free(runtime);
    return NULL;
 }
@@ -331,9 +346,12 @@ void ouro_runtime_stop(ouro_runtime_t **runtime_ptr)
       return;
    ouro_runtime_t *runtime = *runtime_ptr;
    atomic_store_explicit(&runtime->stop, 1, memory_order_release);
-   /* The listener is nonblocking, so the accept loop observes stop within one
-    * short idle tick. Join before writing listener_fd to avoid racing the
-    * accept thread's read of that field. */
+   /* The accept loop sleeps on stop_fd as well as the listener, so this wakes
+    * it at once. Join before writing listener_fd to avoid racing the accept
+    * thread's read of that field. */
+   uint64_t one = 1;
+   while (write(runtime->stop_fd, &one, sizeof one) < 0 && errno == EINTR)
+      ;
    pthread_join(runtime->thread, NULL);
    ouro_endpoint_close(&runtime->listener_fd);
    pthread_mutex_lock(runtime->host_lock);
@@ -343,6 +361,7 @@ void ouro_runtime_stop(ouro_runtime_t **runtime_ptr)
       process_handle_close(&runtime->slot_pidfd[i]);
    pthread_mutex_unlock(runtime->host_lock);
    (void)ouro_endpoint_remove(runtime->socket_path);
+   close(runtime->stop_fd);
    free(runtime);
    *runtime_ptr = NULL;
 }

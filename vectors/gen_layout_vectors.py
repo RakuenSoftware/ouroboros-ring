@@ -76,7 +76,8 @@ struct("control", 96, [
     ("slot_size", 4), ("inline_budget", 4), ("queue_capacity", 4),
     ("lease_view_slots", 4),
     ("arena_size", 8), ("host_epoch", 8), ("host_heartbeat", 8),
-    ("lease_view_off", 8), ("host_waiting", 4), ("reserved1", 28),
+    ("lease_view_off", 8), ("host_waiting", 4), ("reserved2", 4),
+    ("reserved1", 24),
 ])
 row("control.flag.lease_view", 0x1, "D12: a lease view follows the header")
 row("control.flag.doorbell", 0x2, "D13: the host keeps host_waiting and signals doorbells")
@@ -93,7 +94,7 @@ struct("qpair", 96, [
     ("magic", 4), ("slot_size", 4), ("capacity", 4), ("data_credits", 4),
     ("control_credits", 4), ("control_lost", 4), ("inbound_off", 4),
     ("outbound_off", 4), ("client_heartbeat", 8), ("client_waiting", 4),
-    ("reserved", 52),
+    ("reserved0", 4), ("reserved", 48),
 ])
 row("qpair.ring_align", 64, "each ring starts on a 64-byte boundary after the header")
 
@@ -139,6 +140,9 @@ row("attach.fd.client_doorbell", 4)
 
 # ---- lease release payload (D12) ---------------------------------------------
 struct("lease_release", 8, [("lease_id", 4), ("generation", 4)])
+
+# ---- overflow payload (D6; decoded by subscribers since D14) ------------------
+struct("overflow", 16, [("shed_seq", 8), ("shed_kind", 4), ("dst_slot", 4)])
 
 # ---- AMOD module envelope ----------------------------------------------------
 row("amod.magic", le_magic("AMOD"))

@@ -51,6 +51,8 @@
  * addition made in reserved space, which older readers ignore; layout_version
  * is unchanged (D12). */
 #define OURO_CONTROL_F_LEASE_VIEW 0x00000001u
+/* D13: the host keeps host_waiting and signals client doorbells. */
+#define OURO_CONTROL_F_DOORBELL 0x00000002u
 
 /* Entries in the lease view that follows the control header (D12). Equal to
  * the host's lease-table size; ouro_arena.c asserts it. */
@@ -103,12 +105,15 @@ typedef struct
    _Atomic uint64_t host_epoch;
    _Atomic uint64_t host_heartbeat;
    _Atomic uint64_t lease_view_off; /* D12; was reserved1[0]. Valid iff F_LEASE_VIEW */
-   _Atomic uint64_t reserved1[4];
+   _Atomic uint32_t host_waiting;   /* D13; host-written. Valid iff F_DOORBELL */
+   _Atomic uint32_t reserved2;
+   _Atomic uint64_t reserved1[3];
 } ouro_control_t;
 
 _Static_assert(sizeof(ouro_control_t) == 96, "control header size is frozen by layout_version");
 _Static_assert(offsetof(ouro_control_t, lease_view_slots) == 28, "D12 uses reserved0");
 _Static_assert(offsetof(ouro_control_t, lease_view_off) == 56, "D12 uses reserved1[0]");
+_Static_assert(offsetof(ouro_control_t, host_waiting) == 64, "D13 uses the old reserved1[0]");
 
 /* One lease-view entry (D12): where a published arena lease's bytes are, so a
  * consumer in another process can read the payload a frame references by lease
@@ -141,10 +146,13 @@ typedef struct
    _Atomic uint32_t inbound_off;
    _Atomic uint32_t outbound_off;
    _Atomic uint64_t client_heartbeat;
-   _Atomic uint64_t reserved[7];
+   _Atomic uint32_t client_waiting; /* D13; client-written. Read iff F_DOORBELL */
+   _Atomic uint32_t reserved0;
+   _Atomic uint64_t reserved[6];
 } ouro_qpair_hdr_t;
 
 _Static_assert(sizeof(ouro_qpair_hdr_t) == 96, "queue-pair header size is frozen by layout_version");
+_Static_assert(offsetof(ouro_qpair_hdr_t, client_waiting) == 40, "D13 uses the old reserved[0]");
 
 /* Handles into a mapped queue-pair region: the two ring handles plus the header. */
 typedef struct

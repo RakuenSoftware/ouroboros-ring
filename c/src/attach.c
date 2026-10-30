@@ -8,7 +8,7 @@
 
 int ouro_fd_send(int sock, const void *payload, size_t len, const int *fds, int n)
 {
-   if (n < 0 || n > 3)
+   if (n < 0 || n > OURO_ATTACH_FDS_MAX)
    {
       errno = EINVAL;
       return -1;
@@ -17,7 +17,7 @@ int ouro_fd_send(int sock, const void *payload, size_t len, const int *fds, int 
    union
    {
       struct cmsghdr align;
-      char buf[CMSG_SPACE(sizeof(int) * 3)];
+      char buf[CMSG_SPACE(sizeof(int) * OURO_ATTACH_FDS_MAX)];
    } cbuf;
    memset(&cbuf, 0, sizeof cbuf);
    struct msghdr msg;
@@ -43,7 +43,7 @@ int ouro_fd_send(int sock, const void *payload, size_t len, const int *fds, int 
 
 long ouro_fd_recv(int sock, void *payload, size_t len, int *fds, int max_fds, int *n_out)
 {
-   if (max_fds < 0 || max_fds > 3)
+   if (max_fds < 0 || max_fds > OURO_ATTACH_FDS_MAX)
    {
       errno = EINVAL;
       return -1;
@@ -54,7 +54,7 @@ long ouro_fd_recv(int sock, void *payload, size_t len, int *fds, int max_fds, in
    union
    {
       struct cmsghdr align;
-      char buf[CMSG_SPACE(sizeof(int) * 3)];
+      char buf[CMSG_SPACE(sizeof(int) * OURO_ATTACH_FDS_MAX)];
    } cbuf;
    memset(&cbuf, 0, sizeof cbuf);
    struct msghdr msg;

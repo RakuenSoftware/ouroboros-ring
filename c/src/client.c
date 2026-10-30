@@ -1,4 +1,7 @@
 /* ouro_client.c: the C reference ring client. See ouro_client.h. */
+#include <errno.h>
+#include <poll.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -17,6 +20,7 @@ ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t 
    if (!c || sock < 0)
       return OURO_CLIENT_ERR_ARG;
    memset(c, 0, sizeof *c);
+   c->host_doorbell_fd = c->doorbell_fd = -1;
 
    ouro_attach_request_t req;
    memset(&req, 0, sizeof req);
@@ -25,12 +29,14 @@ ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t 
    req.wire_version_max = OURO_WIRE_VERSION;
    req.principal_class = principal_class;
    req.principal_ref = principal_ref;
+   /* D13: an older host reads only the first 16 bytes and grants no doorbell. */
+   req.capabilities = OURO_ATTACH_CAP_DOORBELL;
    if (ouro_fd_send(sock, &req, sizeof req, NULL, 0) != 0)
       return OURO_CLIENT_ERR_OS;
 
-   int fds[OURO_ATTACH_FDS];
+   int fds[OURO_ATTACH_FDS_MAX];
    int nfd = 0;
-   long n = ouro_fd_recv(sock, &c->reply, sizeof c->reply, fds, OURO_ATTACH_FDS, &nfd);
+   long n = ouro_fd_recv(sock, &c->reply, sizeof c->reply, fds, OURO_ATTACH_FDS_MAX, &nfd);
    if (n != (long)sizeof c->reply || c->reply.magic != OURO_ATTACH_REPLY_MAGIC)
    {
       for (int i = 0; i < nfd; i++)
@@ -45,7 +51,11 @@ ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t 
          close(fds[i]);
       return OURO_CLIENT_DENIED;
    }
-   if (nfd != OURO_ATTACH_FDS)
+   /* The grant's capabilities and its descriptor count must agree. A host
+    * grants only what was asked for, so any other bit is a protocol error. */
+   int doorbell = (c->reply.capabilities & OURO_ATTACH_CAP_DOORBELL) != 0;
+   if ((c->reply.capabilities & ~OURO_ATTACH_CAP_DOORBELL) != 0 ||
+       nfd != (doorbell ? OURO_ATTACH_FDS_DOORBELL : OURO_ATTACH_FDS))
    {
       for (int i = 0; i < nfd; i++)
          close(fds[i]);
@@ -79,14 +89,28 @@ ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t 
       goto done;
    if (ouro_control_lease_view(&c->control, c->ctl, &c->lease_view) != OURO_REGION_OK)
       c->lease_view = NULL; /* an older host: arena payloads stay unreadable */
+   if (doorbell && !(atomic_load_explicit(&c->ctl->flags, memory_order_acquire) &
+                     OURO_CONTROL_F_DOORBELL))
+   {
+      rc = OURO_CLIENT_ERR_PROTOCOL;
+      goto done;
+   }
+   if (doorbell)
+   {
+      c->host_doorbell_fd = fds[OURO_ATTACH_FD_HOST_DOORBELL];
+      c->doorbell_fd = fds[OURO_ATTACH_FD_CLIENT_DOORBELL];
+      c->have_doorbell = 1;
+   }
 
    c->attached_epoch = c->reply.host_epoch;
    rc = OURO_CLIENT_OK;
 
 done:
-   /* The mappings hold their own references; the descriptors can be closed. */
-   for (int i = 0; i < OURO_ATTACH_FDS; i++)
-      close(fds[i]);
+   /* The mappings hold their own references; the region descriptors can be
+    * closed. The doorbells stay open while the client is attached. */
+   for (int i = 0; i < nfd; i++)
+      if (!(rc == OURO_CLIENT_OK && doorbell && i >= OURO_ATTACH_FD_HOST_DOORBELL))
+         close(fds[i]);
    if (rc != OURO_CLIENT_OK)
       ouro_client_detach(c);
    return rc;
@@ -99,7 +123,77 @@ void ouro_client_detach(ouro_client_t *c)
    ouro_region_unmap(&c->control);
    ouro_region_unmap(&c->arena);
    ouro_region_unmap(&c->qpair);
+   if (c->have_doorbell)
+   {
+      close(c->host_doorbell_fd);
+      close(c->doorbell_fd);
+   }
    memset(c, 0, sizeof *c);
+   c->host_doorbell_fd = c->doorbell_fd = -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* doorbells (D13)                                                      */
+
+static void doorbell_ring(int fd)
+{
+   uint64_t one = 1;
+   ssize_t n;
+   do
+      n = write(fd, &one, sizeof one);
+   while (n < 0 && errno == EINTR);
+}
+
+/* After committing into the outbound ring, or consuming from the inbound ring
+ * (which can unblock a producer the host is holding), wake the host if it is
+ * asleep. The fence pairs with ouro_host_wait's. */
+static void signal_host(const ouro_client_t *c)
+{
+   if (!c->have_doorbell)
+      return;
+   atomic_thread_fence(memory_order_seq_cst);
+   if (atomic_load_explicit(&c->ctl->host_waiting, memory_order_relaxed) != 0)
+      doorbell_ring(c->host_doorbell_fd);
+}
+
+int ouro_client_wait(ouro_client_t *c, int timeout_ms)
+{
+   if (!c || !c->ctl || !c->have_doorbell)
+      return -1;
+   atomic_store_explicit(&c->qp.hdr->client_waiting, 1, memory_order_seq_cst);
+   atomic_thread_fence(memory_order_seq_cst);
+   /* The slot the last poll handed out is still counted until the next poll
+    * releases it, so it is not a new event. */
+   uint64_t seen = c->have_pending_read ? 1u : 0u;
+   if (ouro_ring_count(&c->qp.inbound) > seen || ouro_client_epoch_changed(c))
+   {
+      atomic_store_explicit(&c->qp.hdr->client_waiting, 0, memory_order_relaxed);
+      return 1;
+   }
+   struct pollfd p = {.fd = c->doorbell_fd, .events = POLLIN};
+   int rc;
+   /* EINTR ends the wait as a timeout: a signal-driven stop must not wait
+    * out the whole timeout. */
+   rc = poll(&p, 1, timeout_ms);
+   if (rc > 0)
+   {
+      uint64_t count;
+      while (read(c->doorbell_fd, &count, sizeof count) < 0 && errno == EINTR)
+         ;
+   }
+   atomic_store_explicit(&c->qp.hdr->client_waiting, 0, memory_order_relaxed);
+   return rc > 0 ? 1 : 0;
+}
+
+void ouro_client_interrupt(ouro_client_t *c)
+{
+   if (c && c->have_doorbell)
+      doorbell_ring(c->doorbell_fd);
+}
+
+int ouro_client_doorbell_fd(const ouro_client_t *c)
+{
+   return c && c->have_doorbell ? c->doorbell_fd : -1;
 }
 
 /* Encode a frame (and inline payload) into the outbound ring. */
@@ -144,6 +238,7 @@ static ouro_client_result_t emit(ouro_client_t *c, uint16_t flags, uint32_t kind
    if (len)
       memcpy(slot + OURO_WIRE_HDR_LEN, payload, len);
    ouro_ring_produce_commit(&c->qp.outbound);
+   signal_host(c);
    return OURO_CLIENT_OK;
 }
 
@@ -182,6 +277,7 @@ ouro_client_result_t ouro_client_publish_arena(ouro_client_t *c, uint32_t kind, 
    if (ouro_wire_encode(&f, slot, c->reply.slot_size) != OURO_WIRE_HDR_LEN)
       return OURO_CLIENT_ERR_ARG;
    ouro_ring_produce_commit(&c->qp.outbound);
+   signal_host(c);
    return OURO_CLIENT_OK;
 }
 
@@ -279,6 +375,7 @@ ouro_client_result_t ouro_client_poll(ouro_client_t *c, ouro_event_t *out)
    {
       ouro_ring_consume_commit(&c->qp.inbound);
       c->have_pending_read = 0;
+      signal_host(c);
    }
    /* The arena span handed out by the previous poll is no longer the caller's
     * to read: return its ref (D12). */
@@ -301,6 +398,7 @@ ouro_client_result_t ouro_client_poll(ouro_client_t *c, ouro_event_t *out)
       /* A malformed inbound frame should never happen — the host encodes it —
        * but if it does, drop it rather than hand back garbage. */
       ouro_ring_consume_commit(&c->qp.inbound);
+      signal_host(c);
       return OURO_CLIENT_EMPTY;
    }
    if ((out->frame.hdr_flags & OURO_F_INLINE) && out->frame.payload_len > 0)
