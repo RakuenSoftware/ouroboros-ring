@@ -76,7 +76,7 @@ jobs:
           cache-dependency-path: go/go.sum
       - name: Format
         working-directory: go
-        run: test -z "$(gofmt -l ring)"
+        run: test -z "$(gofmt -l .)"
       - name: Vet and test without cgo
         working-directory: go
         env:
@@ -94,37 +94,12 @@ jobs:
         env:
           CGO_ENABLED: "0"
           OURO_CONFORMANCE_HOST: ${{ github.workspace }}/build/ouroboros-ring-conformance-host
-        run: go test -count=1 -run Conformance -v ./ring
+        run: go test -count=1 -run 'Conformance|CHost' -v ./ring ./cmd/...
       - name: C module caller against the Go module process
         run: |
           cmake --build build --target ouroboros-ring-module-runtime-harness
           (cd go && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/go-module-helper" ./ring/testdata/module_helper)
           timeout 60s build/ouroboros-ring-module-runtime-harness "$RUNNER_TEMP/go-module-helper"
-
-  # D16: the reference telemetry exporter, its own module so the client keeps
-  # no OpenTelemetry dependency.
-  exporter-otlp:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
-        with:
-          go-version-file: exporters/otlp/go.mod
-          cache-dependency-path: exporters/otlp/go.sum
-      - name: Format
-        working-directory: exporters/otlp
-        run: test -z "$(gofmt -l .)"
-      - name: Vet and test with the race detector
-        working-directory: exporters/otlp
-        run: go vet ./... && go test -race -count=1 ./...
-      - name: Build the C conformance host
-        run: cmake -S c -B build -DBUILD_TESTING=ON && cmake --build build --target ouroboros-ring-conformance-host
-      - name: Exporter against the C host
-        working-directory: exporters/otlp
-        env:
-          OURO_CONFORMANCE_HOST: ${{ github.workspace }}/build/ouroboros-ring-conformance-host
-        run: go test -count=1 -run CHost -v ./...
 
   rust:
     runs-on: ubuntu-24.04

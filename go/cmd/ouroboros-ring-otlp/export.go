@@ -23,7 +23,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
-const scope = "github.com/RakuenSoftware/ouroboros-ring/exporters/otlp"
+const scope = "github.com/RakuenSoftware/ouroboros-ring/go/cmd/ouroboros-ring-otlp"
 
 // maxBatch bounds one request. A larger backlog is sent as several requests,
 // back to back.

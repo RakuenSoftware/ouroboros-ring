@@ -18,7 +18,7 @@ flowchart LR
         P -- "3." --> R
     end
     subgraph exporter["Telemetry process"]
-        X["reference exporter<br/>exporters/otlp"]
+        X["reference exporter<br/>go/cmd/ouroboros-ring-otlp"]
     end
     T -- "doorbell, only when it sleeps" --> X
     X -- "one OTLP request per wakeup" --> COL["collector<br/>(off the host)"]
@@ -114,9 +114,16 @@ had a doorbell granted, and while no other live slot holds it.
 
 ## The reference exporter
 
-`exporters/otlp` is a separate Go module, so the Go client keeps no
-OpenTelemetry dependency. It sends OTLP/HTTP logs, one log record per ring
-record:
+`go/cmd/ouroboros-ring-otlp` is in the ring's Go module, so a consumer builds
+it at the release it already pins:
+
+```sh
+go build github.com/RakuenSoftware/ouroboros-ring/go/cmd/ouroboros-ring-otlp
+```
+
+The `ring` package imports none of its OpenTelemetry dependencies, and
+`scripts/check_go_no_cgo.sh` fails the build if it ever does. It sends OTLP/HTTP
+logs, one log record per ring record:
 
 | OTLP field | From |
 |---|---|

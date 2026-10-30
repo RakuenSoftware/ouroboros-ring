@@ -213,7 +213,7 @@ and Rust code creates no regions and accepts no attaches.
 | `c/tests/`, `c/bench/` | the C tests and the dispatch-overhead benchmark |
 | `go/ring/` | the Go client, module caller and module runtime (pure Go, no cgo) |
 | `rust/` | the Rust client, module caller and module runtime (depends only on `libc`) |
-| `exporters/otlp/` | the reference telemetry exporter (D16), its own Go module |
+| `go/cmd/ouroboros-ring-otlp/` | the reference telemetry exporter (D16) |
 | `spec/`, `vectors/` | the contract: prose and the frozen numbers |
 
 ## Further reading
