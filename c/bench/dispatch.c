@@ -8,15 +8,43 @@
  * It prints the lines scripts/check_perf_budget.sh parses:
  *   dispatch_overhead_ns=<median per-event nanoseconds>
  *   dispatch_overhead_p99_ns=<p99>
+ *
+ * With OURO_BENCH_TELEMETRY=1 the host also writes a D16 record per event, and
+ * a consumer thread drains them as an exporter would, so the same number shows
+ * what the hand-off adds.
  */
 #define _GNU_SOURCE
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <ouroboros/local_attach.h>
+#include <ouroboros/telemetry.h>
+
+static atomic_int telemetry_stop;
+static atomic_ullong telemetry_drained;
+
+static void *telemetry_drain(void *p)
+{
+   ouro_telemetry_reader_t *r = p;
+   while (!atomic_load_explicit(&telemetry_stop, memory_order_relaxed))
+   {
+      uint64_t n = ouro_telemetry_available(r);
+      if (n == 0)
+      {
+         (void)ouro_telemetry_wait(r, -1, 10);
+         continue;
+      }
+      ouro_telemetry_release(r, n);
+      atomic_fetch_add_explicit(&telemetry_drained, n, memory_order_relaxed);
+   }
+   return NULL;
+}
 
 static uint64_t now_ns(void)
 {
@@ -58,6 +86,19 @@ int main(int argc, char **argv)
    attach_client(&h, &pub);
    attach_client(&h, &sub);
    ouro_host_subscribe(&h, sub.reply.handle_id, KIND);
+
+   const char *tenv = getenv("OURO_BENCH_TELEMETRY");
+   int telemetry = tenv && strcmp(tenv, "1") == 0;
+   ouro_telemetry_reader_t reader;
+   pthread_t drainer;
+   if (telemetry)
+   {
+      if (ouro_host_telemetry_enable(&h, 0) != OURO_HOST_OK ||
+          ouro_telemetry_reader_open(dup(h.telemetry_region.fd), dup(h.telemetry_doorbell_fd),
+                                     &reader) != OURO_TELEMETRY_OK ||
+          pthread_create(&drainer, NULL, telemetry_drain, &reader) != 0)
+         abort();
+   }
 
    /* One event's dispatch = publish (producer enqueue) + host pump (route) +
     * poll (consumer dequeue). Batched to the ring's data capacity so timer
@@ -115,6 +156,15 @@ int main(int argc, char **argv)
    fprintf(stderr, "bench: %llu batches of %u events (median %llu ns/event, p99 %llu ns)\n",
            (unsigned long long)batches, batch, (unsigned long long)median, (unsigned long long)p99);
 
+   if (telemetry)
+   {
+      atomic_store(&telemetry_stop, 1);
+      pthread_join(drainer, NULL);
+      fprintf(stderr, "bench: telemetry on, %llu records drained, %llu lost\n",
+              (unsigned long long)atomic_load(&telemetry_drained),
+              (unsigned long long)ouro_telemetry_dropped(&reader));
+      ouro_telemetry_reader_close(&reader);
+   }
    free(samples);
    ouro_client_detach(&pub);
    ouro_client_detach(&sub);

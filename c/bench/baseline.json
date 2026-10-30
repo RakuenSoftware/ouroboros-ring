@@ -6,6 +6,12 @@
       "ceiling_ns": 1000,
       "observed_ns": 134,
       "observed_note": "measured when the benchmark lived in aimee (reference dev box). The ceiling carries ~7x headroom so CI variance does not flake the check while a per-event syscall still trips it."
+    },
+    "dispatch_overhead_telemetry_ns": {
+      "description": "The same dispatch with D16 telemetry on: the host writes one record per event and a consumer thread drains them as an exporter would (OURO_BENCH_TELEMETRY=1).",
+      "ceiling_ns": 1000,
+      "observed_ns": 100,
+      "observed_note": "measured 2026-10-30 on the reference dev box: 87 ns off, 100 ns on. Same headroom rule as dispatch_overhead_ns."
     }
   }
 }
