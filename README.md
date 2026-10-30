@@ -16,15 +16,16 @@ and pins a release of it like any other.
   implementation would be. None links, imports or generates from another.
 - **The documentation** in [`docs/`](docs/README.md) explains how it works:
   the [architecture](docs/architecture.md), attach and admission, routing and
-  flow control, module calls, arena payloads, capture, conformance, and
-  versions.
+  flow control, module calls, arena payloads, capture, telemetry, conformance,
+  and versions.
 
 ## Implementations
 
 | Path | Language | What it is | Proven by |
 |---|---|---|---|
-| [`c/`](c/) | C11, POSIX/Linux | The host and a client, the module runtime, and the conformance host harness. `libouroboros-ring` (all of it) and `libouroboros-ring-client` (attach, wire, region, ring, module protocol: what a module process links) | `c/tests/` and the module runtime harness (17 tests, also under ASan/UBSan; the arena under TSan); dispatch overhead within the budget in `c/bench/baseline.json` |
+| [`c/`](c/) | C11, POSIX/Linux | The host and a client, the module runtime, and the conformance host harness. `libouroboros-ring` (all of it) and `libouroboros-ring-client` (attach, wire, region, ring, module protocol: what a module process links) | `c/tests/` and the module runtime harness (19 tests, also under ASan/UBSan; the arena under TSan); dispatch overhead, with and without telemetry, within the budget in `c/bench/baseline.json` |
 | [`go/`](go/) | Go, no cgo | Client, module caller and module runtime: `github.com/RakuenSoftware/ouroboros-ring/go/ring` | `go test ./...` with `CGO_ENABLED=0`; `scripts/check_go_no_cgo.sh` |
+| [`go/cmd/ouroboros-ring-otlp/`](go/cmd/ouroboros-ring-otlp/) | Go | The reference telemetry exporter (D16): the one process a host grants its telemetry ring, sending every record to an OTLP collector. In the Go module, so a consumer builds it at the ring release it already pins; the `ring` package imports none of its OpenTelemetry dependencies | `go test -race`; `TestExportFromCHost` against the C host; `scripts/check_go_no_cgo.sh` keeps OpenTelemetry out of `go/ring` |
 | [`rust/`](rust/) | Rust 2024 | Client, module caller and module runtime: crate `ouroboros-ring`, depending only on `libc` | `cargo test`; `rust/tests/c_host_conformance.rs` against the C host |
 
 The host exists only in C. The Go and Rust implementations are clients

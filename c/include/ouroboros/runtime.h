@@ -23,6 +23,7 @@ typedef struct
    size_t request_count;
    const uint32_t *serve;
    size_t serve_count;
+   int telemetry; /* D16: hand this principal the telemetry consumer end */
 } ouro_runtime_grant_t;
 
 typedef struct ouro_runtime ouro_runtime_t;

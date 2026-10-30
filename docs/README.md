@@ -13,6 +13,7 @@ could disagree.
 | [Module calls](module-calls.md) | the AMOD envelope, the module runtime and the module caller, and how call outcomes are decided |
 | [Arena payloads](arena-payloads.md) | payloads too large for a slot: leases, producing next to the host, reading from any process |
 | [Capture](capture.md) | recording the tap stream, the capture format, and reading it back |
+| [Telemetry](telemetry.md) | every stamped event described off the host at once: the record, the hand-off to one exporter process, loss, and the reference OTLP exporter |
 | [Implementations and conformance](implementations-and-conformance.md) | what C, Go and Rust each provide, the evidence that holds them to the contract, and adding a language |
 | [Versions and releases](versions-and-releases.md) | release tags, the contract's own version numbers, and how consumers pin a release |
 

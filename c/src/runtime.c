@@ -208,6 +208,8 @@ static ouro_attach_status_t runtime_bind(void *ctx, ouro_host_t *host, uint32_t 
    for (size_t i = 0; i < grant->serve_count; i++)
       if (ouro_host_serve_kind(host, slot, grant->serve[i]) != OURO_HOST_OK)
          goto denied;
+   if (grant->telemetry && ouro_host_grant_telemetry(host, slot) != OURO_HOST_OK)
+      goto denied;
    process_handle_close(&runtime->slot_pidfd[slot]);
    runtime->slot_pidfd[slot] = peer_pidfd;
    /* D15: the accept loop watches this handle and releases the slot the moment
@@ -518,6 +520,9 @@ static int parse_grant_file(const char *path, owned_grant_t *owned)
          ok = parse_kinds(value, owned->request, &owned->grant.request_count) == 0;
       else if (strcmp(key, "serve") == 0)
          ok = parse_kinds(value, owned->serve, &owned->grant.serve_count) == 0;
+      else if (strcmp(key, "telemetry") == 0)
+         ok = strcmp(value, "yes") == 0 ? (owned->grant.telemetry = 1, 1)
+                                        : strcmp(value, "no") == 0;
       else
          ok = 0;
    }

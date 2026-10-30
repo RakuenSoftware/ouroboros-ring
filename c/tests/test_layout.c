@@ -22,6 +22,7 @@
 #include <ouroboros/attach.h>
 #include <ouroboros/region.h>
 #include <ouroboros/ring.h>
+#include <ouroboros/telemetry.h>
 #include <ouroboros/wire.h>
 #include <ouroboros/module_protocol.h>
 
@@ -212,6 +213,7 @@ int main(void)
        E("attach_request.v0_size", OURO_ATTACH_REQ_V0_BYTES),
        E("attach.cap.doorbell", OURO_ATTACH_CAP_DOORBELL),
        E("attach.cap.process_liveness", OURO_ATTACH_CAP_PROCESS_LIVENESS),
+       E("attach.cap.telemetry", OURO_ATTACH_CAP_TELEMETRY),
        E("attach_reply.magic", OURO_ATTACH_REPLY_MAGIC),
        E("attach_reply.size", sizeof(ouro_attach_reply_t)),
        E("attach_reply.off.magic", offsetof(ouro_attach_reply_t, magic)),
@@ -236,6 +238,30 @@ int main(void)
        E("attach.descriptors_doorbell", OURO_ATTACH_FDS_DOORBELL),
        E("attach.fd.host_doorbell", OURO_ATTACH_FD_HOST_DOORBELL),
        E("attach.fd.client_doorbell", OURO_ATTACH_FD_CLIENT_DOORBELL),
+       E("attach.descriptors_telemetry", OURO_ATTACH_FDS_TELEMETRY),
+       E("attach.fd.telemetry", OURO_ATTACH_FD_TELEMETRY),
+       E("attach.fd.telemetry_doorbell", OURO_ATTACH_FD_TELEMETRY_BELL),
+
+       E("telemetry.magic", OURO_TELEMETRY_MAGIC),
+       E("telemetry.version", OURO_TELEMETRY_VERSION),
+       E("telemetry.off.magic", offsetof(ouro_telemetry_region_t, magic)),
+       E("telemetry.off.version", offsetof(ouro_telemetry_region_t, version)),
+       E("telemetry.off.record_size", offsetof(ouro_telemetry_region_t, record_size)),
+       E("telemetry.off.flags", offsetof(ouro_telemetry_region_t, flags)),
+       E("telemetry.off.host_epoch", offsetof(ouro_telemetry_region_t, host_epoch)),
+       E("telemetry.off.dropped", offsetof(ouro_telemetry_region_t, dropped)),
+       E("telemetry.off.consumer_waiting", offsetof(ouro_telemetry_region_t, consumer_waiting)),
+       E("telemetry.off.ring", OURO_TELEMETRY_REGION_OFF_RING),
+       E("telemetry_record.off.type", OURO_TELEMETRY_OFF_TYPE),
+       E("telemetry_record.off.flags", OURO_TELEMETRY_OFF_FLAGS),
+       E("telemetry_record.off.realtime_ns", OURO_TELEMETRY_OFF_REALTIME_NS),
+       E("telemetry_record.off.lost", OURO_TELEMETRY_OFF_LOST),
+       E("telemetry_record.off.reserved", OURO_TELEMETRY_OFF_RESERVED),
+       E("telemetry_record.off.frame", OURO_TELEMETRY_OFF_FRAME),
+       E("telemetry_record.off.reserved_tail", OURO_TELEMETRY_OFF_RESERVED_TAIL),
+       E("telemetry_record.size", OURO_TELEMETRY_RECORD_LEN),
+       E("telemetry_record.type.event", OURO_TELEMETRY_RECORD_EVENT),
+       E("telemetry_record.type.gap", OURO_TELEMETRY_RECORD_GAP),
 
        E("lease_release.size", OURO_LEASE_RELEASE_LEN),
        E("lease_release.off.lease_id", OURO_LEASE_RELEASE_OFF_LEASE),

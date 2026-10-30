@@ -32,6 +32,9 @@
  *     process liveness; the client's slot is never stale-reaped, so the next
  *     client getting the freed slot proves the departing one announced its
  *     detach.
+ *   - D16: telemetry is on, and an external client attaching as principal_ref
+ *     CONFORMANCE_TELEMETRY_PRINCIPAL is granted the consumer end, so it reads
+ *     the record of every event it caused, its own and the C side's answers.
  *
  * Usage: ouroboros-ring-conformance-host <socket-path> [timeout-ms]
  * It listens, accepts exactly one external client, pumps and services until the
@@ -166,12 +169,16 @@ static ouro_attach_status_t admit_peer(void *ctx, int fd, const ouro_attach_requ
    return OURO_ATTACH_OK;
 }
 
+#define CONFORMANCE_TELEMETRY_PRINCIPAL 0x7E1Eu
+
 static ouro_attach_status_t bind_peer(void *ctx, ouro_host_t *h, uint32_t slot,
                                       const ouro_attach_request_t *request)
 {
-   (void)ctx, (void)request;
+   (void)ctx;
    if (g_peer_known)
       (void)ouro_host_bind_process(h, slot);
+   if (request->principal_ref == CONFORMANCE_TELEMETRY_PRINCIPAL)
+      (void)ouro_host_grant_telemetry(h, slot);
    return OURO_ATTACH_OK;
 }
 
@@ -205,6 +212,12 @@ int main(int argc, char **argv)
    if (ouro_host_create(&h, &cfg, admit_peer, NULL) != OURO_HOST_OK)
    {
       fprintf(stderr, "host create failed\n");
+      return 1;
+   }
+
+   if (ouro_host_telemetry_enable(&h, 256) != OURO_HOST_OK)
+   {
+      fprintf(stderr, "telemetry enable failed\n");
       return 1;
    }
 

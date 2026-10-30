@@ -122,6 +122,7 @@ struct("attach_request", 20, [
 row("attach_request.v0_size", 16, "D13: a host accepts the 16-byte v0 request too")
 row("attach.cap.doorbell", 0x1, "D13: request and grant a doorbell pair")
 row("attach.cap.process_liveness", 0x2, "D15: the host releases the slot when the client process exits")
+row("attach.cap.telemetry", 0x4, "D16: the consumer end of the host's telemetry ring")
 row("attach_reply.magic", le_magic("ABRP"))
 struct("attach_reply", 48, [
     ("magic", 4), ("status", 4), ("handle_id", 4), ("wire_version", 4),
@@ -138,6 +139,27 @@ row("attach.fd.qpair", 2)
 row("attach.descriptors_doorbell", 5, "D13: then host doorbell, client doorbell")
 row("attach.fd.host_doorbell", 3)
 row("attach.fd.client_doorbell", 4)
+row("attach.descriptors_telemetry", 7, "D16: then the telemetry region and its doorbell")
+row("attach.fd.telemetry", 5)
+row("attach.fd.telemetry_doorbell", 6)
+
+# ---- telemetry region and record (D16) ---------------------------------------
+row("telemetry.magic", le_magic("TLMY"))
+row("telemetry.version", 1)
+row("telemetry.off.magic", 0)
+row("telemetry.off.version", 4)
+row("telemetry.off.record_size", 8)
+row("telemetry.off.flags", 12)
+row("telemetry.off.host_epoch", 16)
+row("telemetry.off.dropped", 24, "host-written: every record ever lost")
+row("telemetry.off.consumer_waiting", 64, "consumer-written, its own cache line")
+row("telemetry.off.ring", 128, "a ring of telemetry_record.size slots")
+struct("telemetry_record", 128, [
+    ("type", 4), ("flags", 4), ("realtime_ns", 8), ("lost", 8), ("reserved", 8),
+    ("frame", 64), ("reserved_tail", 32),
+])
+row("telemetry_record.type.event", 0)
+row("telemetry_record.type.gap", 1)
 
 # ---- lease release payload (D12) ---------------------------------------------
 struct("lease_release", 8, [("lease_id", 4), ("generation", 4)])

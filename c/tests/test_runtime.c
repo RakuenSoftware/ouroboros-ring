@@ -3,6 +3,7 @@
 #include <ouroboros/endpoint.h>
 #include <ouroboros/host.h>
 #include <ouroboros/runtime.h>
+#include <ouroboros/telemetry.h>
 
 #include <assert.h>
 #include <limits.h>
@@ -28,6 +29,78 @@ static ouro_client_result_t attach(const char *path, uint32_t principal_ref, our
    ouro_client_result_t result = ouro_client_attach_as(fd, client, 1, principal_ref);
    assert(ouro_endpoint_close(&fd) == 0);
    return result;
+}
+
+/* D16: a grant file says which principal is the telemetry exporter. Only that
+ * principal is handed the consumer end, and only it while it lives. */
+static void test_telemetry_grant(const char *directory, const char *executable)
+{
+   char policy[PATH_MAX], grant_path[PATH_MAX], bad_path[PATH_MAX], sock[PATH_MAX];
+   assert(snprintf(policy, sizeof policy, "%s/tpolicy", directory) > 0);
+   assert(snprintf(grant_path, sizeof grant_path, "%s/exporter.grant", policy) > 0);
+   assert(snprintf(sock, sizeof sock, "%s/telemetry.sock", directory) > 0);
+   assert(mkdir(policy, 0700) == 0);
+   FILE *f = fopen(grant_path, "w");
+   assert(f != NULL);
+   assert(fprintf(f, "version=1\nprincipal_class=1\nprincipal_ref=11\nuid=self\nexecutable=%s\n"
+                     "telemetry=yes\n",
+                  executable) > 0);
+   assert(fclose(f) == 0);
+   ouro_runtime_policy_t *parsed = NULL;
+   assert(ouro_runtime_policy_load_dir(policy, &parsed) == 0);
+   size_t count = 0;
+   const ouro_runtime_grant_t *loaded = ouro_runtime_policy_grants(parsed, &count);
+   assert(count == 1 && loaded[0].telemetry == 1);
+   ouro_runtime_policy_free(&parsed);
+
+   /* Any other value is a malformed policy, not a quiet "no". */
+   assert(snprintf(bad_path, sizeof bad_path, "%s/bad.grant", policy) > 0);
+   f = fopen(bad_path, "w");
+   assert(f != NULL);
+   assert(fprintf(f, "version=1\nprincipal_class=1\nprincipal_ref=12\nuid=self\nexecutable=%s\n"
+                     "telemetry=maybe\n",
+                  executable) > 0);
+   assert(fclose(f) == 0);
+   assert(ouro_runtime_policy_load_dir(policy, &parsed) != 0);
+   assert(unlink(bad_path) == 0);
+
+   ouro_runtime_grant_t grants[] = {
+       {.principal_class = 1, .principal_ref = 11, .uid = OURO_RUNTIME_SELF_UID,
+        .executable = executable, .telemetry = 1},
+       {.principal_class = 1, .principal_ref = 12, .uid = OURO_RUNTIME_SELF_UID,
+        .executable = executable}};
+   ouro_host_config_t host_config = {.max_slots = 8, .slot_size = 512, .inline_budget = 400,
+                                    .queue_capacity = 8, .arena_size = 16384};
+   ouro_host_t host;
+   assert(ouro_host_create(&host, &host_config, NULL, NULL) == OURO_HOST_OK);
+   assert(ouro_host_telemetry_enable(&host, 64) == OURO_HOST_OK);
+   pthread_mutex_t host_lock = PTHREAD_MUTEX_INITIALIZER;
+   ouro_runtime_config_t config = {.socket_path = sock, .socket_mode = 0600, .backlog = 8,
+                                   .stale_after_ns = 60000000000ULL, .grants = grants,
+                                   .grant_count = 2};
+   ouro_runtime_t *runtime = ouro_runtime_start(&host, &host_lock, &config);
+   assert(runtime != NULL);
+
+   ouro_client_t other, exporter;
+   ouro_telemetry_reader_t reader;
+   int granted = 1, fd = -1;
+   assert(ouro_endpoint_connect(sock, &fd) == 0);
+   assert(ouro_client_attach_telemetry(fd, &other, 1, 12, &reader, &granted) == OURO_CLIENT_OK);
+   assert(ouro_endpoint_close(&fd) == 0);
+   assert(!granted);
+   assert(ouro_endpoint_connect(sock, &fd) == 0);
+   assert(ouro_client_attach_telemetry(fd, &exporter, 1, 11, &reader, &granted) == OURO_CLIENT_OK);
+   assert(ouro_endpoint_close(&fd) == 0);
+   assert(granted && reader.hdr != NULL);
+
+   ouro_telemetry_reader_close(&reader);
+   ouro_client_detach(&exporter);
+   ouro_client_detach(&other);
+   ouro_runtime_stop(&runtime);
+   ouro_host_destroy(&host);
+   pthread_mutex_destroy(&host_lock);
+   assert(unlink(grant_path) == 0);
+   assert(rmdir(policy) == 0);
 }
 
 static int crash_client(const char *socket_path)
@@ -367,6 +440,7 @@ int main(int argc, char **argv)
    pthread_mutex_destroy(&host_lock);
    test_role_admission(socket_path, executable);
    test_host_exit_wakes_client(directory, executable);
+   test_telemetry_grant(directory, executable);
    assert(unlink(grant_path) == 0);
    assert(rmdir(policy_path) == 0);
    assert(rmdir(directory) == 0);

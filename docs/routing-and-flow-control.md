@@ -21,7 +21,7 @@ flowchart TB
     decode --> valid{"well-formed and<br/>granted?"}
     valid -- no --> drop["count as dropped<br/>(capability_denied to the sender<br/>for an ungranted kind)"] --> next
     valid -- yes --> seen{"already stamped<br/>(a blocked retry)?"}
-    seen -- no --> stamp["stamp seq, offer to the tap"] --> route
+    seen -- no --> stamp["stamp seq, write the telemetry record,<br/>offer to the tap"] --> route
     seen -- yes --> route["route by pattern"]
     route --> result{"every destination<br/>resolved?"}
     result -- yes --> commit["commit: advance the outbound ring"] --> next

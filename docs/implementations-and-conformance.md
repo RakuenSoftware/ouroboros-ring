@@ -19,6 +19,7 @@ about the contract rather than one codebase agreeing with itself.
 | Sleeping on the doorbell (D13) | `ouro_host_wait`, `ouro_client_wait` | `Client.Wait` | `Client::wait` |
 | Notifications to modules and callers (D14) | `notify`, `overflow` | `Notify`, `Overflow`, `OnNotification`, `Publish` | `notify`, `overflow`, `started` |
 | Process liveness and announced detach (D15) | `ouro_host_bind_process`, `ouro_runtime_maintenance_due`, `ouro_client_liveness_watched` | `HasProcessLiveness` | `has_process_liveness`, `liveness_watched` |
+| Telemetry consumer end (D16) | `ouro_host_telemetry_enable`, `ouro_host_grant_telemetry`, `ouro_client_attach_telemetry`, `ouro_telemetry_*` | `AttachTelemetry`, `ConnectTelemetry`, `TelemetryReader`; the OTLP exporter `cmd/ouroboros-ring-otlp` | layout only |
 | Runtime listener and grant files | `ouro_runtime_*` | no | no |
 | Dependencies | libc, pthreads | `golang.org/x/sys/unix`, no cgo | `libc` only, no build script |
 

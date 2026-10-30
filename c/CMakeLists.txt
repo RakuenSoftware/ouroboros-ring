@@ -39,6 +39,7 @@ set(OURO_CLIENT_SOURCES
     src/module_runtime.c
     src/region.c
     src/ring.c
+    src/telemetry.c
     src/wire.c)
 set(OURO_HOST_SOURCES
     src/arena.c
@@ -47,7 +48,8 @@ set(OURO_HOST_SOURCES
     src/local_attach.c
     src/region_host.c
     src/route.c
-    src/runtime.c)
+    src/runtime.c
+    src/telemetry_host.c)
 
 foreach(lib ouroboros-ring-client ouroboros-ring)
     if(lib STREQUAL "ouroboros-ring")
@@ -95,11 +97,12 @@ if(BUILD_TESTING)
     set(OURO_TEST_region src/region.c src/region_host.c src/ring.c)
     set(OURO_TEST_arena src/arena.c src/region.c src/ring.c)
     foreach(name host route flow client capture local_attach doorbell runtime
-                 module_embedded_runtime module_client_pool)
+                 module_embedded_runtime module_client_pool telemetry)
         set(OURO_TEST_${name} ${OURO_ALL_SOURCES})
     endforeach()
     foreach(name ring wire endpoint module_protocol layout region arena host route flow client
-                 capture local_attach doorbell runtime module_embedded_runtime module_client_pool)
+                 capture local_attach doorbell runtime module_embedded_runtime module_client_pool
+                 telemetry)
         add_executable(test_${name} tests/test_${name}.c ${OURO_TEST_${name}})
         target_compile_features(test_${name} PRIVATE c_std_11)
         target_compile_options(test_${name} PRIVATE ${OURO_WARNINGS})

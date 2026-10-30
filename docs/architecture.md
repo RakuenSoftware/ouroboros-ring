@@ -121,7 +121,10 @@ sequenceDiagram
 2. The host drains outbound rings. It overwrites `src_handle` from the slot the
    frame came from, checks the frame's placement against the live geometry, and
    stamps `seq`, the host-wide order that capture and replay use.
-3. The host offers the event to the tap exactly once, before any routing
+3. If telemetry is on, the host first writes the event's content-free record
+   into the telemetry ring, which one exporter process drains off the host
+   ([telemetry](telemetry.md), [D16](../spec/decisions.md#d16-tap-telemetry-leaves-the-host-the-moment-an-event-is-stamped)).
+   Then it offers the event to the tap exactly once, before any routing
    decision, so the tap sees the intended stream in total order
    ([D6](../spec/decisions.md#d6-the-tap-records-the-intended-stream-sheds-are-events)).
 4. The host routes by pattern: a notification to the kind's subscribed
@@ -180,6 +183,7 @@ flowchart TB
         mproto["module_protocol.c<br/>AMOD envelope"]
         mrun["module_runtime.c<br/>serving a module"]
         mcli["module_client.c<br/>calling a module"]
+        tread["telemetry.c<br/>D16 record codec, reader"]
     end
     subgraph hostlib["libouroboros-ring (adds the host)"]
         direction LR
@@ -187,6 +191,7 @@ flowchart TB
         route["route.c<br/>pump, routing, flow control"]
         arena["arena.c<br/>leases, lease view"]
         capture["capture.c<br/>tap recorder, reader"]
+        tlm["telemetry_host.c<br/>D16 record writer"]
         rhost["region_host.c<br/>memfd creation"]
         runtime["runtime.c<br/>listener, grants, peer checks"]
         local["local_attach.c<br/>in-process attach"]
@@ -208,6 +213,7 @@ and Rust code creates no regions and accepts no attaches.
 | `c/tests/`, `c/bench/` | the C tests and the dispatch-overhead benchmark |
 | `go/ring/` | the Go client, module caller and module runtime (pure Go, no cgo) |
 | `rust/` | the Rust client, module caller and module runtime (depends only on `libc`) |
+| `go/cmd/ouroboros-ring-otlp/` | the reference telemetry exporter (D16) |
 | `spec/`, `vectors/` | the contract: prose and the frozen numbers |
 
 ## Further reading
@@ -220,6 +226,8 @@ and Rust code creates no regions and accepts no attaches.
   module caller.
 - [Arena payloads](arena-payloads.md): large payloads and leases.
 - [Capture](capture.md): the tap recorder and the capture format.
+- [Telemetry](telemetry.md): every stamped event described off the host, and
+  the exporter that sends it.
 - [Implementations and conformance](implementations-and-conformance.md): the
   three implementations and how a new one is proven.
 - [Versions and releases](versions-and-releases.md): what each version number

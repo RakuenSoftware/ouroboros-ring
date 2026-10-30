@@ -165,6 +165,40 @@ pub(crate) const ATTACH_CAP_PROCESS_LIVENESS: u32 = 0x2;
 /// D15: the heartbeat a detaching client leaves; the host releases the slot.
 pub(crate) const HEARTBEAT_DETACHED: u64 = u64::MAX;
 
+/// D16: the telemetry consumer end. The Rust client does not consume it (the
+/// reference exporter is Go); the layout is declared so the table is held in
+/// full.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "D16: not a telemetry consumer; held to the table")
+)]
+pub(crate) mod telemetry {
+    pub(crate) const ATTACH_CAP_TELEMETRY: u32 = 0x4;
+    pub(crate) const ATTACH_FDS_TELEMETRY: usize = 7;
+    pub(crate) const ATTACH_FD_TELEMETRY: usize = 5;
+    pub(crate) const ATTACH_FD_TELEMETRY_DOORBELL: usize = 6;
+    pub(crate) const MAGIC: u32 = 0x594d_4c54; // "TLMY"
+    pub(crate) const VERSION: u32 = 1;
+    pub(crate) const OFF_MAGIC: usize = 0;
+    pub(crate) const OFF_VERSION: usize = 4;
+    pub(crate) const OFF_RECORD_SIZE: usize = 8;
+    pub(crate) const OFF_FLAGS: usize = 12;
+    pub(crate) const OFF_HOST_EPOCH: usize = 16;
+    pub(crate) const OFF_DROPPED: usize = 24;
+    pub(crate) const OFF_CONSUMER_WAITING: usize = 64;
+    pub(crate) const OFF_RING: usize = 128;
+    pub(crate) const RECORD_LEN: usize = 128;
+    pub(crate) const RECORD_OFF_TYPE: usize = 0;
+    pub(crate) const RECORD_OFF_FLAGS: usize = 4;
+    pub(crate) const RECORD_OFF_REALTIME_NS: usize = 8;
+    pub(crate) const RECORD_OFF_LOST: usize = 16;
+    pub(crate) const RECORD_OFF_RESERVED: usize = 24;
+    pub(crate) const RECORD_OFF_FRAME: usize = 32;
+    pub(crate) const RECORD_OFF_RESERVED_TAIL: usize = 96;
+    pub(crate) const RECORD_EVENT: u32 = 0;
+    pub(crate) const RECORD_GAP: u32 = 1;
+}
+
 // ---- lease-release payload (D12) ---------------------------------------------
 pub(crate) const LEASE_RELEASE_OFF_LEASE: usize = 0;
 pub(crate) const LEASE_RELEASE_OFF_GENERATION: usize = 4;
@@ -357,6 +391,69 @@ mod tests {
                 "attach.cap.process_liveness",
                 ATTACH_CAP_PROCESS_LIVENESS.into(),
             ),
+            (
+                "attach.cap.telemetry",
+                telemetry::ATTACH_CAP_TELEMETRY.into(),
+            ),
+            (
+                "attach.descriptors_telemetry",
+                telemetry::ATTACH_FDS_TELEMETRY as u64,
+            ),
+            ("attach.fd.telemetry", telemetry::ATTACH_FD_TELEMETRY as u64),
+            (
+                "attach.fd.telemetry_doorbell",
+                telemetry::ATTACH_FD_TELEMETRY_DOORBELL as u64,
+            ),
+            ("telemetry.magic", telemetry::MAGIC.into()),
+            ("telemetry.version", telemetry::VERSION.into()),
+            ("telemetry.off.magic", telemetry::OFF_MAGIC as u64),
+            ("telemetry.off.version", telemetry::OFF_VERSION as u64),
+            (
+                "telemetry.off.record_size",
+                telemetry::OFF_RECORD_SIZE as u64,
+            ),
+            ("telemetry.off.flags", telemetry::OFF_FLAGS as u64),
+            ("telemetry.off.host_epoch", telemetry::OFF_HOST_EPOCH as u64),
+            ("telemetry.off.dropped", telemetry::OFF_DROPPED as u64),
+            (
+                "telemetry.off.consumer_waiting",
+                telemetry::OFF_CONSUMER_WAITING as u64,
+            ),
+            ("telemetry.off.ring", telemetry::OFF_RING as u64),
+            ("telemetry_record.size", telemetry::RECORD_LEN as u64),
+            (
+                "telemetry_record.off.type",
+                telemetry::RECORD_OFF_TYPE as u64,
+            ),
+            (
+                "telemetry_record.off.flags",
+                telemetry::RECORD_OFF_FLAGS as u64,
+            ),
+            (
+                "telemetry_record.off.realtime_ns",
+                telemetry::RECORD_OFF_REALTIME_NS as u64,
+            ),
+            (
+                "telemetry_record.off.lost",
+                telemetry::RECORD_OFF_LOST as u64,
+            ),
+            (
+                "telemetry_record.off.reserved",
+                telemetry::RECORD_OFF_RESERVED as u64,
+            ),
+            (
+                "telemetry_record.off.frame",
+                telemetry::RECORD_OFF_FRAME as u64,
+            ),
+            (
+                "telemetry_record.off.reserved_tail",
+                telemetry::RECORD_OFF_RESERVED_TAIL as u64,
+            ),
+            (
+                "telemetry_record.type.event",
+                telemetry::RECORD_EVENT.into(),
+            ),
+            ("telemetry_record.type.gap", telemetry::RECORD_GAP.into()),
             ("lease_release.size", LEASE_RELEASE_LEN as u64),
             ("lease_release.off.lease_id", LEASE_RELEASE_OFF_LEASE as u64),
             (

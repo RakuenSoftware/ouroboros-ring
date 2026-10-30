@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <ouroboros/client.h>
+#include <ouroboros/telemetry.h>
 #include <ouroboros/ring.h>
 
 /* D15: a process handle on the peer at the other end of the attach socket. */
@@ -33,9 +34,13 @@ ouro_client_result_t ouro_client_attach(int sock, ouro_client_t *c)
    return ouro_client_attach_as(sock, c, 0, 0);
 }
 
-ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t principal_class,
-                                         uint32_t principal_ref)
+/* telemetry_fds is non-NULL when the caller asks for the D16 grant; on a grant
+ * it receives the region and doorbell descriptors, otherwise -1 each. */
+static ouro_client_result_t attach(int sock, ouro_client_t *c, uint32_t principal_class,
+                                   uint32_t principal_ref, int *telemetry_fds)
 {
+   if (telemetry_fds)
+      telemetry_fds[0] = telemetry_fds[1] = -1;
    if (!c || sock < 0)
       return OURO_CLIENT_ERR_ARG;
    memset(c, 0, sizeof *c);
@@ -50,6 +55,8 @@ ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t 
    req.principal_ref = principal_ref;
    /* D13/D15: an older host reads only the first 16 bytes and grants neither. */
    req.capabilities = OURO_ATTACH_CAP_DOORBELL | OURO_ATTACH_CAP_PROCESS_LIVENESS;
+   if (telemetry_fds)
+      req.capabilities |= OURO_ATTACH_CAP_TELEMETRY;
    if (ouro_fd_send(sock, &req, sizeof req, NULL, 0) != 0)
       return OURO_CLIENT_ERR_OS;
 
@@ -73,9 +80,12 @@ ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t 
    /* The grant's capabilities and its descriptor count must agree. A host
     * grants only what was asked for, so any other bit is a protocol error. */
    int doorbell = (c->reply.capabilities & OURO_ATTACH_CAP_DOORBELL) != 0;
-   if ((c->reply.capabilities & ~(OURO_ATTACH_CAP_DOORBELL | OURO_ATTACH_CAP_PROCESS_LIVENESS)) !=
-           0 ||
-       nfd != (doorbell ? OURO_ATTACH_FDS_DOORBELL : OURO_ATTACH_FDS))
+   int telemetry = (c->reply.capabilities & OURO_ATTACH_CAP_TELEMETRY) != 0;
+   uint32_t asked = req.capabilities;
+   if ((c->reply.capabilities & ~asked) != 0 || (telemetry && !doorbell) ||
+       nfd != (telemetry  ? OURO_ATTACH_FDS_TELEMETRY
+               : doorbell ? OURO_ATTACH_FDS_DOORBELL
+                          : OURO_ATTACH_FDS))
    {
       for (int i = 0; i < nfd; i++)
          close(fds[i]);
@@ -128,13 +138,47 @@ ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t 
 
 done:
    /* The mappings hold their own references; the region descriptors can be
-    * closed. The doorbells stay open while the client is attached. */
+    * closed. The doorbells stay open while the client is attached, and the
+    * telemetry pair goes to the caller. */
    for (int i = 0; i < nfd; i++)
-      if (!(rc == OURO_CLIENT_OK && doorbell && i >= OURO_ATTACH_FD_HOST_DOORBELL))
+   {
+      if (rc == OURO_CLIENT_OK && telemetry && i >= OURO_ATTACH_FD_TELEMETRY)
+         telemetry_fds[i - OURO_ATTACH_FD_TELEMETRY] = fds[i];
+      else if (!(rc == OURO_CLIENT_OK && doorbell && i >= OURO_ATTACH_FD_HOST_DOORBELL))
          close(fds[i]);
+   }
    if (rc != OURO_CLIENT_OK)
       ouro_client_detach(c);
    return rc;
+}
+
+ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t principal_class,
+                                         uint32_t principal_ref)
+{
+   return attach(sock, c, principal_class, principal_ref, NULL);
+}
+
+ouro_client_result_t ouro_client_attach_telemetry(int sock, ouro_client_t *c,
+                                                  uint32_t principal_class,
+                                                  uint32_t principal_ref,
+                                                  ouro_telemetry_reader_t *reader, int *granted)
+{
+   if (!reader || !granted)
+      return OURO_CLIENT_ERR_ARG;
+   *granted = 0;
+   memset(reader, 0, sizeof *reader);
+   reader->region.fd = reader->doorbell_fd = -1;
+   int fds[2];
+   ouro_client_result_t rc = attach(sock, c, principal_class, principal_ref, fds);
+   if (rc != OURO_CLIENT_OK || fds[0] < 0)
+      return rc;
+   if (ouro_telemetry_reader_open(fds[0], fds[1], reader) != OURO_TELEMETRY_OK)
+   {
+      ouro_client_detach(c);
+      return OURO_CLIENT_ERR_PROTOCOL;
+   }
+   *granted = 1;
+   return OURO_CLIENT_OK;
 }
 
 static void doorbell_ring(int fd);

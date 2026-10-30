@@ -40,6 +40,8 @@
 #include <ouroboros/ring.h>
 #include <ouroboros/wire.h>
 
+#include "telemetry_internal.h"
+
 #define KIND_SERVER_NONE (-1)
 
 /* ---- slot bitmaps ---- */
@@ -244,6 +246,7 @@ static void emit_control(ouro_host_t *h, int dst, uint32_t kind, uint64_t corr, 
    }
    f.seq = ++h->seq;
    f.dst_handle = dst < 0 ? 0 : (uint32_t)dst;
+   ouro_telemetry_stamped(h, &f);
    if (h->tap)
       h->tap(h->tap_ctx, &f, (const uint8_t *)payload, plen);
    if (h->loss && (kind == OURO_KIND_OVERFLOW || kind == OURO_KIND_PRODUCER_REAPED))
@@ -790,6 +793,7 @@ static void lease_release(ouro_host_t *h, uint32_t src, ouro_frame_t *f, const u
        f->payload_len == OURO_LEASE_RELEASE_LEN)
       p = ring_slot + f->payload_ref;
    f->seq = ++h->seq;
+   ouro_telemetry_stamped(h, f);
    if (h->tap)
       h->tap(h->tap_ctx, f, p, p ? f->payload_len : 0);
    if (!p || ouro_arena_release(&h->arena, le32_at(p + OURO_LEASE_RELEASE_OFF_LEASE),
@@ -802,6 +806,9 @@ uint32_t ouro_host_pump(ouro_host_t *h)
    if (!h || !h->slots)
       return 0;
    uint32_t routed = 0;
+   /* D16: records are written per event, the consumer is signalled once. */
+   h->in_pump = 1;
+   h->telemetry_now = 0;
 
    for (uint32_t s = 0; s < h->cfg.max_slots; s++)
    {
@@ -863,6 +870,7 @@ uint32_t ouro_host_pump(ouro_host_t *h)
          else
          {
             f.seq = ++h->seq;
+            ouro_telemetry_stamped(h, &f); /* D16: off the host first */
             if (h->tap)
             {
                const uint8_t *tap_payload = inl;
@@ -918,5 +926,7 @@ uint32_t ouro_host_pump(ouro_host_t *h)
               OURO_HEARTBEAT_DETACHED)
          (void)ouro_host_release_slot(h, s);
    }
+   h->in_pump = 0;
+   ouro_telemetry_host_signal(h);
    return routed;
 }

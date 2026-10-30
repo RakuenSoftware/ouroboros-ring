@@ -1,4 +1,4 @@
-# Ring v0: rendered decisions (D1–D12)
+# Ring v0: rendered decisions (D1–D16)
 
 - **State:** DECIDED. 2026-07-23, revision 7, after six rounds of roundtable review.
 - **Origin:** written while the ring was built inside
@@ -811,6 +811,102 @@ expired.
 (`SO_PEERCRED`), never from anything the client sends, so a client cannot bind its slot to another
 process. A client that writes `OURO_HEARTBEAT_DETACHED` only releases its own slot, which it could
 already do by exiting. A client that stops heartbeating without the grant is reaped as before.
+
+---
+
+## D16: Tap telemetry leaves the host the moment an event is stamped
+
+*Added 2026-10-30, after v0. One attach capability bit, one new region, two more descriptors in a
+telemetry grant; `layout_version` stays 1.*
+
+**Decision: when the host stamps an event's `seq`, it writes one fixed-size, content-free telemetry
+record into a single-producer, single-consumer ring in its own region, before the tap callback runs
+and before routing. A separate telemetry process holds the only consumer end and exports the records
+off the host as soon as it is woken. The host never blocks, never allocates, and never makes a
+system call per event for it. The ring owns the record and the hand-off; the exporter is a separate
+process, so the ring library still never touches a network.**
+
+Before this, telemetry about ring traffic existed only as an embedding's in-process tap callback. In
+the reference deployment that callback was the governance tap, and the Go `TapObserver` that would
+have counted events could never be called, because only the C implementation has a host. So nothing
+about ring traffic left the host at all. The guarantee this decision provides is that every
+`seq`-stamped event is described off the host without waiting for the embedding, the tap, a module,
+or a timer. The only window in which an event is known only to the host is the time between its
+stamp and the telemetry process's next read.
+
+- **The record.** 128 bytes, little-endian, in `seq` order:
+
+  | Offset | Field | |
+  |---|---|---|
+  | 0 | `type` u32 | `0` event, `1` gap |
+  | 4 | `flags` u32 | zero; a reader rejects a record with an unknown bit |
+  | 8 | `realtime_ns` u64 | `CLOCK_REALTIME` at the host's first stamp of the pump that stamped it |
+  | 16 | `lost` u64 | gap: records lost just before this one; event: zero |
+  | 24 | reserved u64 | zero |
+  | 32 | frame header, 64 bytes | the stamped header, encoded exactly as on the wire ([D4](#d4-slot-size-and-inline-budget-control-region-parameters-not-wire-fields)) |
+  | 96 | reserved, 32 bytes | zero |
+
+  The clock is read once per pump, at its first stamp, and once for each event stamped outside a
+  pump: a pump takes microseconds, `seq` orders the records within it exactly, and a clock read per
+  event would cost more than the rest of the record.
+
+  The frame header carries `seq`, kind, pattern and placement flags, `principal_ref`,
+  `src_handle`, `correlation_id`, `payload_len` and, for a host-generated control event, its
+  destination. **No payload byte is ever in a record.** A gap record's frame header is all zero.
+- **The region.** One `memfd`, created by `ouro_host_telemetry_enable`, which outlives every
+  consumer:
+
+  | Offset | Field | Written by |
+  |---|---|---|
+  | 0 | `magic` u32 `"TLMY"` (0x594d4c54) | host, last, with release order |
+  | 4 | `version` u32 = 1 | host |
+  | 8 | `record_size` u32 = 128 | host |
+  | 12 | `flags` u32 = 0 | host |
+  | 16 | `host_epoch` u64 | host |
+  | 24 | `dropped` u64 | host: every record ever lost |
+  | 64 | `consumer_waiting` u32 | consumer only ([D13](#d13-doorbells-idle-ends-sleep-in-the-kernel)) |
+  | 128 | an `ouro_ring` of 128-byte slots | head: host; tail: consumer |
+
+  Geometry is validated once and copied, as for every ring. The host reads only `tail` and
+  `consumer_waiting` from shared memory after creation.
+- **The hand-off.** The host writes the record, then publishes it with a release store of `head`. It
+  rings the telemetry doorbell under the D13 protocol (sequentially consistent fence, then a load of
+  `consumer_waiting`), but only once per `ouro_host_pump` and only if the consumer is asleep. The
+  host keeps its own copy of `head` and of the last `tail` it read, and reads `tail` across cores
+  only when that copy says the ring is full. Measured with `c/bench/dispatch.c`, the whole hand-off
+  adds about 13 ns to an event's 87 ns dispatch. An
+  event stamped outside a pump, such as the `producer_reaped` a reap emits, rings it at once. A busy
+  host whose exporter keeps up makes no system calls for telemetry at all.
+- **Never blocks.** If the ring is full when an event is stamped, the host counts the record as
+  lost (`dropped` and a pending gap count) and goes on. The next record that fits is preceded by a gap
+  record carrying the count, so the exported stream says how much is missing and where, just as
+  `overflow` does for a consumer ([D6](#d6-the-tap-records-the-intended-stream-sheds-are-events)).
+  Telemetry loss never sheds, delays or reorders the events themselves.
+- **Who consumes.** A client sets `OURO_ATTACH_CAP_TELEMETRY` (bit 2) with the doorbell bit. The host
+  grants it only when telemetry is enabled, the embedding granted that slot with
+  `ouro_host_grant_telemetry` from its attach hook (the runtime does so for a grant file that says
+  `telemetry=yes`), the doorbell was granted, and no other live slot holds the grant. The grant adds two descriptors after the five of D13: the telemetry region, then
+  the telemetry doorbell. When the consumer's slot is released, the next granted consumer continues
+  from the same `tail`, so records written while no exporter was attached are not lost unless the ring
+  filled.
+- **Export.** The ring ships the exporter as a separate process, not a library a host links: the
+  reference exporter reads every available record, sends them in one request, and advances `tail`
+  only when the collector has accepted them. It has no batching timer: a record waits only for the
+  request in flight ahead of it. Delivery is at least once, and `seq` identifies a duplicate. The
+  exporter's only timer is its retry backoff while the collector refuses or is unreachable, and
+  while it waits the ring fills and the host counts what it cannot hold.
+
+**What it does not change.** The tap callback ([D9](#d9-the-tap-in-this-tree-is-a-callback-plus-a-recording-test-double))
+is still the single full-stream observer of payloads, and capture ([D10](#d10-the-v0-capture-stream-format))
+is unchanged. The telemetry record is written before the tap is called, so a slow tap cannot delay
+it.
+
+**Threat model ([D2](#d2-threat-model)).** The record is metadata, but metadata about every principal
+on the ring, so the grant is the embedding's decision and is never implied by admission. The
+consumer maps the region read-write, because it owns `tail` and `consumer_waiting`. Scribbling on
+either can only make the host see the ring as full (records are counted lost) or skip a wakeup; both
+are masked by the local geometry and cannot move where the host writes. A consumer cannot see
+payloads, other clients' queues, or the arena through this grant.
 
 ---
 

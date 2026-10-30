@@ -13,18 +13,25 @@
  * so it carries OURO_ATTACH_FDS_DOORBELL. */
 #define OURO_ATTACH_FDS                3
 #define OURO_ATTACH_FDS_DOORBELL       5
-#define OURO_ATTACH_FDS_MAX            OURO_ATTACH_FDS_DOORBELL
+/* D16: a telemetry grant adds the telemetry region and its doorbell. */
+#define OURO_ATTACH_FDS_TELEMETRY      7
+#define OURO_ATTACH_FDS_MAX            OURO_ATTACH_FDS_TELEMETRY
 #define OURO_ATTACH_FD_CONTROL         0
 #define OURO_ATTACH_FD_ARENA           1
 #define OURO_ATTACH_FD_QPAIR           2
 #define OURO_ATTACH_FD_HOST_DOORBELL   3
 #define OURO_ATTACH_FD_CLIENT_DOORBELL 4
+#define OURO_ATTACH_FD_TELEMETRY       5
+#define OURO_ATTACH_FD_TELEMETRY_BELL  6
 
 /* Attach capabilities (D13): requested in the request, granted in the reply. */
 #define OURO_ATTACH_CAP_DOORBELL 0x00000001u
 /* D15: the host holds an OS handle on the client's process and releases its slot
  * when the process exits, so the client need not heartbeat on a timer. */
 #define OURO_ATTACH_CAP_PROCESS_LIVENESS 0x00000002u
+/* D16: the consumer end of the host's telemetry ring. Granted only with the
+ * doorbell, to the one slot the embedding granted it. */
+#define OURO_ATTACH_CAP_TELEMETRY 0x00000004u
 
 /* The v0 request was the first 16 bytes of ouro_attach_request_t. A host still
  * accepts it, and an older host reads only those 16 bytes of a longer one. */

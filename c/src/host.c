@@ -22,6 +22,8 @@
 #include <ouroboros/host.h>
 #include <ouroboros/ring.h>
 
+#include "telemetry_internal.h"
+
 /* Attach negotiation and frame validation must advertise the same version. */
 #define OURO_HOST_WIRE_VERSION OURO_WIRE_VERSION
 
@@ -131,6 +133,9 @@ static void slot_release(ouro_host_t *h, uint32_t idx)
    if (!s->in_use)
       return;
    ouro_route_forget_slot(h, idx);
+   /* D16: the region outlives its consumer; the next granted one resumes. */
+   if (h->telemetry_slot == idx)
+      h->telemetry_slot = UINT32_MAX;
    /* A departing client's arena leases must not strand the arena: drop the refs
     * it held as a producer and as a consumer. */
    ouro_arena_reap_producer(&h->arena, idx);
@@ -185,6 +190,8 @@ ouro_host_result_t ouro_host_create(ouro_host_t *h, const ouro_host_config_t *cf
    h->control_fd = -1;
    h->arena_fd = -1;
    h->doorbell_fd = -1;
+   h->telemetry_doorbell_fd = -1;
+   h->telemetry_slot = UINT32_MAX;
 
    /* Control region. */
    if (ouro_region_create("ring-control", ouro_control_bytes(), &h->control_region) != OURO_REGION_OK)
@@ -276,6 +283,7 @@ void ouro_host_destroy(ouro_host_t *h)
    if (h->doorbell_fd >= 0)
       close(h->doorbell_fd);
    h->arena_fd = h->control_fd = h->doorbell_fd = -1;
+   ouro_telemetry_host_destroy(h);
 }
 
 /* ------------------------------------------------------------------ */
@@ -459,14 +467,34 @@ static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *sl
       }
    }
 
+   /* D16: the consumer end, to the one granted slot that asked, with a
+    * doorbell, while no other live slot holds it. */
+   int telemetry_bell = -1;
+   if ((req.capabilities & OURO_ATTACH_CAP_TELEMETRY) && h->telemetry && s->telemetry_granted &&
+       nfds == OURO_ATTACH_FDS_DOORBELL && h->telemetry_slot == UINT32_MAX)
+   {
+      telemetry_bell = dup(h->telemetry_doorbell_fd);
+      if (telemetry_bell >= 0)
+      {
+         reply.capabilities |= OURO_ATTACH_CAP_TELEMETRY;
+         nfds = OURO_ATTACH_FDS_TELEMETRY;
+      }
+   }
+
    int gfds[OURO_ATTACH_FDS_MAX];
    gfds[OURO_ATTACH_FD_CONTROL] = control_ro;
    gfds[OURO_ATTACH_FD_ARENA] = h->arena_fd;
    gfds[OURO_ATTACH_FD_QPAIR] = s->qpair_fd;
    gfds[OURO_ATTACH_FD_HOST_DOORBELL] = h->doorbell_fd;
    gfds[OURO_ATTACH_FD_CLIENT_DOORBELL] = s->doorbell_fd;
+   gfds[OURO_ATTACH_FD_TELEMETRY] = h->telemetry_region.fd;
+   gfds[OURO_ATTACH_FD_TELEMETRY_BELL] = telemetry_bell;
    int rc = ouro_fd_send(conn_fd, &reply, sizeof reply, gfds, nfds);
    close(control_ro); /* the client holds its own dup now */
+   if (telemetry_bell >= 0)
+      close(telemetry_bell);
+   if (rc == 0 && (reply.capabilities & OURO_ATTACH_CAP_TELEMETRY))
+      h->telemetry_slot = idx;
    if (rc != 0)
    {
       /* The client never received its grant; undo the admission. */

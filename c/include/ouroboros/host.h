@@ -27,6 +27,7 @@
 #include <ouroboros/attach.h>
 #include <ouroboros/arena.h>
 #include <ouroboros/region_host.h>
+#include <ouroboros/telemetry.h>
 #include <ouroboros/wire.h>
 
 /* A directory slot — host-private. A client never sees this or any other slot. */
@@ -97,6 +98,9 @@ typedef struct
    /* D15: the runtime holds a process handle for this client and releases the
     * slot when the process exits, so the heartbeat reap passes it by. */
    int process_bound;
+
+   /* D16: the embedding granted this slot the telemetry consumer end. */
+   int telemetry_granted;
 } ouro_slot_t;
 
 /* Per-kind overflow policy (D5). Block is the safe default: a full destination
@@ -207,6 +211,21 @@ typedef struct ouro_host
    /* D13: the host doorbell every doorbell client writes; -1 if it could not be
     * created, in which case no client is granted one and the caller polls. */
    int doorbell_fd;
+
+   /* D16: the telemetry ring, written as each event is stamped. telemetry is
+    * NULL until ouro_host_telemetry_enable. telemetry_slot is the slot holding
+    * the consumer end, UINT32_MAX for none. */
+   ouro_region_t telemetry_region;
+   ouro_telemetry_region_t *telemetry;
+   ouro_ring_t telemetry_ring;
+   int telemetry_doorbell_fd;
+   uint32_t telemetry_slot;
+   uint64_t telemetry_head;       /* the producer index, kept locally */
+   uint64_t telemetry_tail_cache; /* the consumer index as last read */
+   uint64_t telemetry_now;        /* this pump's realtime, read at its first stamp */
+   uint64_t telemetry_lost;       /* records lost since the last gap record */
+   int telemetry_unsignalled; /* written since the consumer was last signalled */
+   int in_pump;               /* signal once at the end of the pump, not per event */
 } ouro_host_t;
 
 typedef enum
@@ -297,6 +316,17 @@ const char *ouro_attach_status_name(ouro_attach_status_t s);
 
 /* Set the governance/audit tap. Pass NULL to clear. */
 void ouro_host_set_tap(ouro_host_t *h, ouro_tap_fn fn, void *ctx);
+
+/* D16: create the telemetry ring of `capacity` records (0: the default). From
+ * then on every seq-stamped event writes one record before the tap is called.
+ * Call before any client may ask for the grant. */
+ouro_host_result_t ouro_host_telemetry_enable(ouro_host_t *h, uint32_t capacity);
+
+/* D16: grant `slot` the telemetry consumer end. The embedding calls it from its
+ * attach hook, for the one principal it trusts with metadata about every event;
+ * the host then hands that client the region if it asked and no other live slot
+ * holds it. */
+ouro_host_result_t ouro_host_grant_telemetry(ouro_host_t *h, uint32_t slot);
 
 /* Set the rare loss observer. Pass NULL to clear. */
 void ouro_host_set_loss_sink(ouro_host_t *h, ouro_loss_fn fn, void *ctx);

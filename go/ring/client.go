@@ -39,19 +39,25 @@ const (
 
 	// A successful attach carries exactly these descriptors, in this order. A
 	// doorbell grant (D13) adds the host doorbell and the client's own.
-	attachDescriptors         = 3
-	attachDescriptorsDoorbell = 5
-	attachFdControl           = 0
-	attachFdArena             = 1
-	attachFdQpair             = 2
-	attachFdHostDoorbell      = 3
-	attachFdClientDoorbell    = 4
+	attachDescriptors          = 3
+	attachDescriptorsDoorbell  = 5
+	attachDescriptorsTelemetry = 7 // D16: + the telemetry region and its doorbell
+	attachFdControl            = 0
+	attachFdArena              = 1
+	attachFdQpair              = 2
+	attachFdHostDoorbell       = 3
+	attachFdClientDoorbell     = 4
+	attachFdTelemetry          = 5
+	attachFdTelemetryBell      = 6
 
 	// attachCapDoorbell asks for, and grants, a doorbell pair (D13).
 	attachCapDoorbell uint32 = 0x1
 	// attachCapProcessLiveness (D15): the host holds a handle on this
 	// process and releases the slot when it exits, so no timer heartbeat.
 	attachCapProcessLiveness uint32 = 0x2
+	// attachCapTelemetry (D16): the consumer end of the host's telemetry
+	// ring, granted with the doorbell to the one slot the embedding chose.
+	attachCapTelemetry uint32 = 0x4
 
 	// heartbeatDetached is the client_heartbeat a detaching client leaves
 	// (D15): the host releases the slot at its next pump.
@@ -187,6 +193,28 @@ func Attach(sock int) (*Client, error) {
 // ref as claims only: its admission policy also binds them to SO_PEERCRED and
 // the canonical executable path before granting event capabilities.
 func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, error) {
+	c, _, err := attach(sock, principalClass, principalRef, false)
+	return c, err
+}
+
+// AttachTelemetry attaches as AttachAs does and also asks for the D16
+// telemetry grant. The reader is nil when the host did not grant it; the client
+// is attached either way.
+func AttachTelemetry(sock int, principalClass uint32, principalRef uint32) (*Client, *TelemetryReader, error) {
+	c, tfds, err := attach(sock, principalClass, principalRef, true)
+	if err != nil || tfds == nil {
+		return c, nil, err
+	}
+	r, err := openTelemetryReader(tfds[0], tfds[1])
+	if err != nil {
+		c.Detach()
+		return nil, nil, err
+	}
+	r.host = hostProcess(sock)
+	return c, r, nil
+}
+
+func attach(sock int, principalClass uint32, principalRef uint32, telemetry bool) (*Client, []int, error) {
 	var req [attachReqBytes]byte
 	binary.LittleEndian.PutUint32(req[attachReqOffMagic:], attachReqMagic)
 	binary.LittleEndian.PutUint16(req[attachReqOffWireMin:], WireVersion)
@@ -194,17 +222,20 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 	binary.LittleEndian.PutUint32(req[attachReqOffPrincipalClass:], principalClass)
 	binary.LittleEndian.PutUint32(req[attachReqOffPrincipalRef:], principalRef)
 	// D13/D15: an older host reads only the first 16 bytes and grants neither.
-	binary.LittleEndian.PutUint32(req[attachReqOffCapabilities:],
-		attachCapDoorbell|attachCapProcessLiveness)
+	asked := attachCapDoorbell | attachCapProcessLiveness
+	if telemetry {
+		asked |= attachCapTelemetry
+	}
+	binary.LittleEndian.PutUint32(req[attachReqOffCapabilities:], asked)
 	if err := unix.Sendmsg(sock, req[:], nil, nil, 0); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	replyBuf := make([]byte, attachReplyBytes)
-	oob := make([]byte, unix.CmsgSpace(attachDescriptorsDoorbell*4))
+	oob := make([]byte, unix.CmsgSpace(attachDescriptorsTelemetry*4))
 	n, oobn, _, _, err := unix.Recvmsg(sock, replyBuf, oob, unix.MSG_CMSG_CLOEXEC)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	fds := parseRights(oob[:oobn])
 	closeAll := func() {
@@ -214,24 +245,28 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 	}
 	if n != attachReplyBytes || binary.LittleEndian.Uint32(replyBuf[attachReplyOffMagic:]) != attachReplyMagic {
 		closeAll()
-		return nil, ErrProtocol
+		return nil, nil, ErrProtocol
 	}
 	status := AttachStatus(binary.LittleEndian.Uint32(replyBuf[attachReplyOffStatus:]))
 	if status != AttachOK {
 		closeAll()
-		return &Client{Status: status}, fmt.Errorf("%w: %s", ErrDenied, status)
+		return &Client{Status: status}, nil, fmt.Errorf("%w: %s", ErrDenied, status)
 	}
 	// The grant's capabilities and descriptor count must agree. A host grants
 	// only what was asked for, so any other bit is a protocol error.
 	caps := binary.LittleEndian.Uint32(replyBuf[attachReplyOffCapabilities:])
 	doorbell := caps&attachCapDoorbell != 0
+	granted := caps&attachCapTelemetry != 0
 	wantFds := attachDescriptors
-	if doorbell {
+	switch {
+	case granted:
+		wantFds = attachDescriptorsTelemetry
+	case doorbell:
 		wantFds = attachDescriptorsDoorbell
 	}
-	if caps&^(attachCapDoorbell|attachCapProcessLiveness) != 0 || len(fds) != wantFds {
+	if caps&^asked != 0 || (granted && !doorbell) || len(fds) != wantFds {
 		closeAll()
-		return nil, ErrProtocol
+		return nil, nil, ErrProtocol
 	}
 
 	c := &Client{
@@ -249,7 +284,7 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 		c.slotSize <= HdrLen || c.inlineBudget > c.slotSize ||
 		c.arenaSize == 0 || c.arenaSize > maxRegionBytes {
 		closeAll()
-		return nil, ErrProtocol
+		return nil, nil, ErrProtocol
 	}
 
 	// fds[0] control (read-only), fds[1] arena (rw), fds[2] queue pair (rw).
@@ -260,7 +295,7 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 	ctlSize, err := fdSize(fds[attachFdControl])
 	if err != nil {
 		closeAll()
-		return nil, err
+		return nil, nil, err
 	}
 	ctlLen := ctlBytes
 	if ctlSize >= ctlBytesWithView {
@@ -275,34 +310,44 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 		have, err := fdSize(need.fd)
 		if err != nil {
 			closeAll()
-			return nil, err
+			return nil, nil, err
 		}
 		if have < int64(need.len) {
 			closeAll()
-			return nil, ErrRegion
+			return nil, nil, ErrRegion
 		}
 	}
 	ctlMem, err := unix.Mmap(fds[attachFdControl], 0, ctlLen, unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
 		closeAll()
-		return nil, err
+		return nil, nil, err
 	}
 	arena, err := unix.Mmap(fds[attachFdArena], 0, arenaBytes, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	if err != nil {
 		unix.Munmap(ctlMem)
 		closeAll()
-		return nil, err
+		return nil, nil, err
 	}
 	qpMem, err := unix.Mmap(fds[attachFdQpair], 0, qpBytesLen, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	if err != nil {
 		unix.Munmap(ctlMem)
 		unix.Munmap(arena)
 		closeAll()
-		return nil, err
+		return nil, nil, err
 	}
-	// The mappings hold their own references; the doorbells stay open.
+	// The mappings hold their own references; the doorbells stay open, and
+	// the telemetry pair goes to the caller.
 	for _, fd := range fds[:attachDescriptors] {
 		unix.Close(fd)
+	}
+	var tfds []int
+	if granted {
+		tfds = fds[attachFdTelemetry:attachDescriptorsTelemetry]
+	}
+	closeTelemetry := func() {
+		for _, fd := range tfds {
+			unix.Close(fd)
+		}
 	}
 	c.hostDoorbell, c.doorbell = -1, -1
 	if doorbell {
@@ -313,32 +358,38 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 	c.ctlMem, c.arena, c.qpMem = ctlMem, arena, qpMem
 	if c.control, err = AttachControl(ctlMem); err != nil {
 		c.Detach()
-		return nil, err
+		closeTelemetry()
+		return nil, nil, err
 	}
 	if c.control.SlotSize() != c.slotSize || c.control.InlineBudget() != c.inlineBudget ||
 		c.control.QueueCapacity() != c.queueCapacity || c.control.ArenaSize() != c.arenaSize {
 		c.Detach()
-		return nil, ErrRegion
+		closeTelemetry()
+		return nil, nil, ErrRegion
 	}
 	if c.arenaUsable, err = attachArena(arena, c.arenaSize); err != nil {
 		c.Detach()
-		return nil, err
+		closeTelemetry()
+		return nil, nil, err
 	}
 	if c.qp, err = AttachQueuePair(qpMem); err != nil {
 		c.Detach()
-		return nil, err
+		closeTelemetry()
+		return nil, nil, err
 	}
 	if c.qp.Inbound.SlotSize() != c.slotSize || c.qp.Inbound.Capacity() != c.queueCapacity ||
 		c.qp.Outbound.SlotSize() != c.slotSize || c.qp.Outbound.Capacity() != c.queueCapacity {
 		c.Detach()
-		return nil, ErrRegion
+		closeTelemetry()
+		return nil, nil, ErrRegion
 	}
 	if c.haveDoorbell && c.control.flags()&ctlFlagDoorbell == 0 {
 		c.Detach()
-		return nil, ErrProtocol
+		closeTelemetry()
+		return nil, nil, ErrProtocol
 	}
 	c.leaseView = c.control.leaseView()
-	return c, nil
+	return c, tfds, nil
 }
 
 // ArenaReadable reports whether this attachment can read arena-placed
