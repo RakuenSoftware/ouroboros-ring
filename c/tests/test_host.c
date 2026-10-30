@@ -433,7 +433,11 @@ static void test_owned_attach_keeps_external_policy(void)
                (mode == 0 ? OURO_ATTACH_OK : OURO_ATTACH_DENIED_POLICY),
            "owned identity cannot impersonate external principal");
       if (mode == 0)
+      {
+         /* D15: it lives in the host's process, so no heartbeat is owed. */
+         must(ouro_host_heartbeat_slots(&host) == 0, "an owned client is process-bound");
          client_unmap(&client);
+      }
       must(host.admit == reject_external && host.admit_ctx == &external_calls,
            "external policy retained");
       close(pair[0]);

@@ -395,6 +395,8 @@ static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *sl
    s->principal_ref = req.principal_ref;
    s->last_heartbeat = 0;
    s->heartbeat_at = 0;
+   /* D15: a client on the host's own socketpair lives in the host's process. */
+   s->process_bound = owned;
    h->admitted++;
 
    if (!owned && h->attach_hook)
