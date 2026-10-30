@@ -32,9 +32,11 @@ control.off.arena_size	32
 control.off.host_epoch	40
 control.off.host_heartbeat	48
 control.off.lease_view_off	56
-control.off.reserved1	64
+control.off.host_waiting	64
+control.off.reserved1	68
 control.size	96
 control.flag.lease_view	1
+control.flag.doorbell	2
 lease_view.slots	4096
 lease_view.entry.off.generation	0
 lease_view.entry.off.len	4
@@ -51,7 +53,8 @@ qpair.off.control_lost	20
 qpair.off.inbound_off	24
 qpair.off.outbound_off	28
 qpair.off.client_heartbeat	32
-qpair.off.reserved	40
+qpair.off.client_waiting	40
+qpair.off.reserved	44
 qpair.size	96
 qpair.ring_align	64
 ring.magic	0x474e4952
@@ -74,7 +77,10 @@ attach_request.off.wire_version_min	4
 attach_request.off.wire_version_max	6
 attach_request.off.principal_class	8
 attach_request.off.principal_ref	12
-attach_request.size	16
+attach_request.off.capabilities	16
+attach_request.size	20
+attach_request.v0_size	16
+attach.cap.doorbell	1
 attach_reply.magic	0x50524241
 attach_reply.off.magic	0x00000000
 attach_reply.off.status	4
@@ -83,7 +89,7 @@ attach_reply.off.wire_version	12
 attach_reply.off.slot_size	16
 attach_reply.off.inline_budget	20
 attach_reply.off.queue_capacity	24
-attach_reply.off.reserved	28
+attach_reply.off.capabilities	28
 attach_reply.off.arena_size	32
 attach_reply.off.host_epoch	40
 attach_reply.size	48
@@ -96,6 +102,9 @@ attach.descriptors	3
 attach.fd.control	0
 attach.fd.arena	1
 attach.fd.qpair	2
+attach.descriptors_doorbell	5
+attach.fd.host_doorbell	3
+attach.fd.client_doorbell	4
 lease_release.off.lease_id	0
 lease_release.off.generation	4
 lease_release.size	8

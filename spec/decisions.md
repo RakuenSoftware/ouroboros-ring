@@ -654,6 +654,105 @@ sends an arena-placed request the external client serves, and answers an externa
 arena-placed reply; the Go and Rust clients read each through the view and return the references,
 and a stats request proves the producer's live leases drain to zero after each.
 
+## D13: Doorbells: idle ends sleep in the kernel
+
+*Added 2026-10-30, after v0. Implements the `eventfd` wait D5 decided in r7 but no release shipped.*
+
+**Decision: each side of a queue pair sleeps on an `eventfd` when its ring is empty, and the other
+side signals it only when a waiting flag says it is asleep. An idle host, client or module process
+makes no wakeups except its heartbeat, and a busy one makes no extra system calls.**
+
+Before this, every waiter slept on a timer: the host pump backed off 200µs to 5ms, the Go module
+runtime and concurrent caller 1ms to 10ms, the C module runtime slept 1ms on every pass whether or
+not an event had arrived, and latency-sensitive consumers pinned their ceiling at 1ms. A deployment
+of a few dozen idle processes woke thousands of times a second to find nothing, and every consumer
+traded latency against idle CPU.
+
+**Two descriptors per attach.** The host creates one *host doorbell*, an `eventfd` it reads and
+every client writes, and one *client doorbell* per slot, which the host writes and that client
+reads. Both are created non-blocking and close-on-exec. They travel in the attach grant after the
+three existing descriptors, so the order is control, arena, queue pair, host doorbell, client
+doorbell.
+
+**Negotiated, so either side may be older.** A D13 client sends a 20-byte attach request: the
+16-byte v0 request followed by `capabilities u32`, with `OURO_ATTACH_CAP_DOORBELL` (bit 0). The
+host answers in the reply's former `reserved u32`, now `capabilities`, with the bits it granted, and
+sends five descriptors exactly when bit 0 is granted. Otherwise it sends three, as before.
+- *An older host* reads the request into a 16-byte buffer. `SOCK_SEQPACKET` delivers the first 16
+  bytes, which is a valid v0 request, so it grants v0: `capabilities` 0 and three descriptors.
+- *An older client* sends 16 bytes. A D13 host accepts 16 or 20 bytes and grants that client no
+  doorbell.
+- A client that asked for a doorbell and is granted none runs as before. It treats a grant whose
+  `capabilities` and descriptor count disagree as a protocol error.
+
+**The waiting flags.** Each waiting flag is a `u32` the sleeper owns, in memory the signaller can
+read:
+- **`host_waiting`** sits at control offset 64 (formerly the low half of `reserved1[0]`). It is
+  written only by the host, and the control region is read-only to clients, which is all a signaller
+  needs.
+- **`client_waiting`** sits at queue-pair offset 40 (formerly the low half of `reserved[0]`). It is
+  written only by its client.
+- **`OURO_CONTROL_F_DOORBELL`** (bit 1) says the host maintains `host_waiting` and signals client
+  doorbells. As with D12, both words were zero in every earlier host, so `layout_version` stays 1.
+
+**The protocol.** The protocol is an event count, so no wakeup is lost and no signal is sent while
+the other side is awake.
+1. **Sleeper:** store its flag as 1 with sequentially consistent ordering. Re-check every ring it
+   consumes (the host checks every outbound ring; a client checks its inbound ring). If any is
+   non-empty, store 0 and consume.
+2. **Sleeper, nothing found:** wait for its doorbell to become readable, with a timeout no longer
+   than its next due maintenance. For the host that is heartbeat reaping; for a client it is its own
+   heartbeat. Then read the doorbell to reset it and store 0.
+3. **Signaller:** after a `produce_commit` into a ring the other side consumes, issue a sequentially
+   consistent fence. Load the other side's flag; if it is 1, write 1 to its doorbell.
+   - The host also signals a client after it consumes from that client's outbound ring. A client
+     whose publish returned `would_block` can then sleep until there is room, instead of polling for
+     it.
+
+The fences pair as in Dekker's algorithm: either the sleeper's re-check sees the commit, or the
+signaller's load sees the flag. A spurious wakeup costs one empty check. A missed one cannot
+happen, and the timeout bounds the cost of a peer that breaks the protocol to the same latency as
+v0 polling.
+
+**What this changes for each implementation.** `ouro_client_wait`, `Client.Wait` and
+`Client::wait` sleep until something is readable or a timeout passes, and return at once with "no
+doorbell" against an older host, so callers keep their own backoff only there. The host gains
+`ouro_host_wait`, and the runtime's accept loop blocks in `poll(2)` instead of retrying every 10ms.
+The module runtimes and callers in all three languages wait on the doorbell. This removes the C
+runtime's unconditional 1ms sleep and the Go `MaxIdlePollInterval` trade-off. Heartbeats keep their
+intervals; on an idle deployment they are the only periodic activity left.
+
+**Threat model (D2).** A client can write the shared host doorbell, so a hostile client can wake the
+host spuriously. That costs it no more than publishing frames, which it may already do at any rate,
+and the host still services every ring round-robin. A client cannot read or signal another client's
+doorbell, because it never receives one. Neither flag grants anything: a wrong flag only costs its
+owner a spurious or late wakeup, bounded by the timeout.
+
+## D14: Notifications reach module processes and callers
+
+*Added 2026-10-30, after v0. API only; no wire or layout change.*
+
+**Decision: a module process and a concurrent module caller each take notification and overflow
+handlers, and each can publish on its own slot. Before this, both silently dropped every frame that
+was not a request, a cancel or a reply they were waiting for.**
+
+Routing already delivered notifications to every slot subscribed to a kind (D5) and told a shed
+destination which event it missed (D6), but neither runtime surfaced them. A component that needed
+to learn that another component's state had changed therefore had to ask on a timer. Over a ledger
+stage, each of those asks is a durable audit row.
+
+- **Delivery.** A notification for a kind the slot subscribes to is handed to the process's
+  notification handler with its kind and a copy of its payload. Handlers run off the polling thread
+  and must not block it. Delivery order per producer is the ring's order. Frames of a kind with no
+  handler are discarded, as before.
+- **Loss.** An `overflow` event is decoded and handed to the overflow handler with the shed kind. A
+  consumer that keeps derived state treats it as "re-read what you depend on". The ring guarantees a
+  slot either receives each event it subscribes to or is told it missed one, so this is the only
+  reconciliation a subscriber needs, besides one at attach.
+- **Publishing.** `Publish` on the module process or caller sends a notification on that process's
+  own slot, under that slot's grants. A ring full of undrained events is backpressure: the publisher
+  waits on its doorbell until the host has consumed, and gives up only on its context.
+
 ---
 
 ## Revision history
