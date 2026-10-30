@@ -68,8 +68,9 @@ const atomic_int *ouro_module_invocation_cancel_flag(const ouro_module_invocatio
  * immutable stage table. Installs NO signals and does not detach the client.
  * stop() ends admission, cancels and joins every worker before returning. The
  * loop sleeps on the client's doorbell while idle (D13), so whoever makes stop()
- * true calls ouro_client_interrupt(client) to have it noticed at once; otherwise
- * it is noticed at the next wakeup, within five seconds. */
+ * true MUST call ouro_client_interrupt(client). Without it, stop() is noticed only
+ * at the next wakeup, and a client whose liveness both ends watch (D15) sleeps
+ * with no timeout: that wakeup may never come. */
 typedef int (*ouro_module_service_stop_fn)(void *context);
 int ouro_module_service_run(ouro_client_t *client, const ouro_module_process_config_t *config,
                              ouro_module_service_stop_fn stop, void *stop_context);

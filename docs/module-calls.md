@@ -113,8 +113,10 @@ int main(int argc, char **argv)
 - **Embedding.** `ouro_module_service_run` serves the same stages over a client
   the caller already attached, without installing signal handlers. A host uses
   it to serve stages from inside its own process. The loop sleeps on the
-  client's doorbell while idle, so whoever makes `stop()` true calls
-  `ouro_client_interrupt` to have it noticed at once.
+  client's doorbell while idle, so whoever makes `stop()` true must call
+  `ouro_client_interrupt`. An in-process attach is process-bound
+  ([D15](../spec/decisions.md#d15-liveness-is-the-process-not-a-timer)), so its idle wait has no timeout, and a stop
+  without the interrupt is never noticed.
 - **Notifications.** A module that subscribes to kinds sets `notify` (and
   `overflow`, for the kinds it missed) in its configuration
   ([D14](../spec/decisions.md#d14-notifications-reach-module-processes-and-callers)).
