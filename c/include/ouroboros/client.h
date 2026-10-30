@@ -79,6 +79,11 @@ typedef struct
    int have_doorbell;
    int host_doorbell_fd;
    int doorbell_fd;
+
+   /* D15: a process handle on the host, -1 where the platform has none. Its
+    * exit ends ouro_client_wait and reads as an epoch change. */
+   int host_pidfd;
+   _Atomic int host_gone;
 } ouro_client_t;
 
 /* A received event. `payload` points into the shared inbound slot, or for an
@@ -177,6 +182,15 @@ void ouro_client_interrupt(ouro_client_t *c);
 /* The client doorbell, for a caller that multiplexes it with other
  * descriptors. Readable means "poll". -1 without a doorbell. */
 int ouro_client_doorbell_fd(const ouro_client_t *c);
+
+/* D15: 1 when the host watches this client's process and releases its slot on
+ * exit, so the client need not heartbeat while it is idle. */
+int ouro_client_process_liveness(const ouro_client_t *c);
+
+/* D15: 1 when both ends watch each other's process: the host releases this
+ * client on exit, and this client's wait ends when the host exits. Then an idle
+ * client may wait indefinitely. */
+int ouro_client_liveness_watched(const ouro_client_t *c);
 
 const char *ouro_client_result_name(ouro_client_result_t r);
 

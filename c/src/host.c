@@ -155,6 +155,23 @@ ouro_host_result_t ouro_host_release_slot(ouro_host_t *h, uint32_t slot)
    return OURO_HOST_OK;
 }
 
+ouro_host_result_t ouro_host_bind_process(ouro_host_t *h, uint32_t slot)
+{
+   if (!h || !h->slots || slot >= h->cfg.max_slots || !h->slots[slot].in_use)
+      return OURO_HOST_ERR_ARG;
+   h->slots[slot].process_bound = 1;
+   return OURO_HOST_OK;
+}
+
+uint32_t ouro_host_heartbeat_slots(const ouro_host_t *h)
+{
+   uint32_t n = 0;
+   for (uint32_t i = 0; h && h->slots && i < h->cfg.max_slots; i++)
+      if (h->slots[i].in_use && !h->slots[i].process_bound)
+         n++;
+   return n;
+}
+
 ouro_host_result_t ouro_host_create(ouro_host_t *h, const ouro_host_config_t *cfg, ouro_admit_fn admit,
                                   void *admit_ctx)
 {
@@ -425,6 +442,9 @@ static ouro_host_result_t serve_attach(ouro_host_t *h, int conn_fd, uint32_t *sl
     * client's own doorbell is created here and kept by the slot; the client
     * receives a duplicate in the grant. */
    int nfds = OURO_ATTACH_FDS;
+   /* D15: the attach hook bound the slot to the client's process. */
+   if ((req.capabilities & OURO_ATTACH_CAP_PROCESS_LIVENESS) && s->process_bound)
+      reply.capabilities |= OURO_ATTACH_CAP_PROCESS_LIVENESS;
    if ((req.capabilities & OURO_ATTACH_CAP_DOORBELL) && h->doorbell_fd >= 0)
    {
       s->doorbell_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -482,6 +502,14 @@ uint32_t ouro_host_reap(ouro_host_t *h, uint64_t now, uint64_t stale_ns)
          continue;
 
       uint64_t hb = atomic_load_explicit(&s->qpair.hdr->client_heartbeat, memory_order_acquire);
+      if (hb == OURO_HEARTBEAT_DETACHED && !s->blocked)
+      {
+         slot_release(h, i); /* D15: it said it left */
+         reaped++;
+         continue;
+      }
+      if (s->process_bound)
+         continue; /* D15: its owner releases it when the process exits */
       if (hb != s->last_heartbeat)
       {
          /* The client is alive; note the advance. */

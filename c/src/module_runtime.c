@@ -570,8 +570,11 @@ int ouro_module_service_run(ouro_client_t *client, const ouro_module_process_con
          continue; /* drain everything queued before sleeping */
       /* Nothing queued. Sleep on the doorbell (D13): a request, a finished
        * handler, or the next heartbeat wakes it. In-flight work also has
-       * deadlines to enforce, so it is checked more often. */
-      int timeout = any_work(work) ? MODULE_BUSY_WAIT_MS : MODULE_IDLE_WAIT_MS;
+       * deadlines to enforce, so it is checked more often. A host that watches
+       * this process (D15) needs no heartbeat, so idle is indefinite. */
+      int timeout = any_work(work)                      ? MODULE_BUSY_WAIT_MS
+                    : ouro_client_liveness_watched(client) ? -1
+                                                         : MODULE_IDLE_WAIT_MS;
       if (ouro_client_wait(client, timeout) < 0)
       {
          const struct timespec idle = {.tv_sec = 0, .tv_nsec = 1000000};

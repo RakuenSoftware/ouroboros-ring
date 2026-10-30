@@ -135,15 +135,24 @@ The host's pump is a function, `ouro_host_pump`, that drains every outbound ring
 once and returns. The ring starts no thread for it: the embedding decides when
 to pump, under the same lock it uses for attach and reap, and sleeps between
 pumps in `ouro_host_wait`. Every client sleeps on its own doorbell the same way,
-so an idle ring makes no wakeups but heartbeats
+and where both ends hold a process handle on each other there are no heartbeats
+either, so an idle ring makes no wakeups at all
 ([sleeping and waking](routing-and-flow-control.md#sleeping-and-waking)).
 
 ## Lifetimes and liveness
 
-- **Heartbeats** run both ways. A client advances the heartbeat in its queue
-  pair; the host reaps a slot whose heartbeat stops advancing
-  (`ouro_host_reap`, or `ouro_runtime_maintain` when the runtime owns the
-  listener). Reaping releases the slot's arena references and frees the slot.
+- **Process handles** ([D15](../spec/decisions.md#d15-liveness-is-the-process-not-a-timer)).
+  The runtime listener opens a handle (a pidfd on Linux) on each process it
+  admits, and releases that process's slot the moment it exits. Such a slot is
+  granted process liveness and needs no heartbeat. A client likewise watches the
+  host's process, and the host's exit reads as an epoch change.
+- **Detach** is announced: a detaching client marks its heartbeat
+  `OURO_HEARTBEAT_DETACHED` and rings the host, whose next pump releases the slot.
+- **Heartbeats** remain for a client the host holds no handle on. The client
+  advances the heartbeat in its queue pair; the host reaps a slot whose
+  heartbeat stops advancing (`ouro_host_reap`, or `ouro_runtime_maintain` when
+  the runtime owns the listener, which `ouro_runtime_maintenance_due` says is
+  needed). Releasing a slot, by any of these, frees its arena references.
 - **`host_epoch`** changes when the host restarts or bumps it. Every handle and
   mapping from the old epoch is invalid; clients observe the change and
   re-attach. Events the host had not stamped are lost: the ring is not a

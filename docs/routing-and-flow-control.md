@@ -83,7 +83,12 @@ lock other threads take, as the runtime listener does, splits the host's wait:
 without it, then `ouro_host_wait_end`. `ouro_client_interrupt` and its Go and Rust
 counterparts wake a client's own wait from another thread. The module runtimes
 and callers in all three languages use them, so an idle module process wakes
-only to heartbeat.
+only to heartbeat, and not at all where liveness is the process
+([D15](../spec/decisions.md#d15-liveness-is-the-process-not-a-timer)): a
+runtime-admitted client is granted `OURO_ATTACH_CAP_PROCESS_LIVENESS`, the
+runtime releases its slot when the process exits, and the client's wait also
+ends when the host's process exits. Such a client waits with no timeout, and
+an owner whose `ouro_runtime_maintenance_due` is 0 needs no reap timer.
 
 ## Routing by pattern
 

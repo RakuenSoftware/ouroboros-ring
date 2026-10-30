@@ -211,6 +211,7 @@ int main(void)
        E("attach_request.off.capabilities", offsetof(ouro_attach_request_t, capabilities)),
        E("attach_request.v0_size", OURO_ATTACH_REQ_V0_BYTES),
        E("attach.cap.doorbell", OURO_ATTACH_CAP_DOORBELL),
+       E("attach.cap.process_liveness", OURO_ATTACH_CAP_PROCESS_LIVENESS),
        E("attach_reply.magic", OURO_ATTACH_REPLY_MAGIC),
        E("attach_reply.size", sizeof(ouro_attach_reply_t)),
        E("attach_reply.off.magic", offsetof(ouro_attach_reply_t, magic)),

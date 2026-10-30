@@ -230,6 +230,12 @@ ouro_module_client_call(ouro_module_client_t *client, uint32_t event_kind, uint3
          goto done;
       }
 
+      /* A host that restarted or exited (D15) will never answer. */
+      if (ouro_client_epoch_changed(client->ring))
+      {
+         result = OURO_MODULE_CALL_TRANSPORT;
+         goto done;
+      }
       uint64_t now = monotonic_now_ns();
       if (now)
          ouro_client_heartbeat(client->ring, now);

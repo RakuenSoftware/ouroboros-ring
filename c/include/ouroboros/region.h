@@ -152,6 +152,11 @@ typedef struct
 } ouro_qpair_hdr_t;
 
 _Static_assert(sizeof(ouro_qpair_hdr_t) == 96, "queue-pair header size is frozen by layout_version");
+
+/* D15: the client_heartbeat a detaching client leaves behind. The host releases
+ * the slot at its next pump (or reap) instead of waiting for the heartbeat to
+ * go stale; no clock reading is ever this value. */
+#define OURO_HEARTBEAT_DETACHED UINT64_MAX
 _Static_assert(offsetof(ouro_qpair_hdr_t, client_waiting) == 40, "D13 uses the old reserved[0]");
 
 /* Handles into a mapped queue-pair region: the two ring handles plus the header. */

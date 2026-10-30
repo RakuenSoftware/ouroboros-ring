@@ -65,6 +65,11 @@ pub struct Client {
     /// D13: the doorbell pair, when the host granted one.
     doorbell: Option<Doorbell>,
     wait_lock: Mutex<()>,
+    /// D15: the host releases this slot when this process exits.
+    process_bound: bool,
+    /// D15: a handle on the host's process; its exit reads as an epoch change.
+    host_process: Option<OwnedFd>,
+    host_gone: std::sync::atomic::AtomicBool,
 }
 
 /// The two eventfds of a D13 grant: `host` is written to wake the host, `own`
@@ -113,8 +118,9 @@ impl Client {
         req[ATTACH_REQ_OFF_WIRE_MAX..][..2].copy_from_slice(&WIRE_VERSION.to_le_bytes());
         req[ATTACH_REQ_OFF_CLASS..][..4].copy_from_slice(&principal_class.to_le_bytes());
         req[ATTACH_REQ_OFF_REF..][..4].copy_from_slice(&principal_ref.to_le_bytes());
-        // D13: an older host reads only the first 16 bytes and grants none.
-        req[ATTACH_REQ_OFF_CAPABILITIES..][..4].copy_from_slice(&ATTACH_CAP_DOORBELL.to_le_bytes());
+        // D13/D15: an older host reads only the first 16 bytes and grants none.
+        req[ATTACH_REQ_OFF_CAPABILITIES..][..4]
+            .copy_from_slice(&(ATTACH_CAP_DOORBELL | ATTACH_CAP_PROCESS_LIVENESS).to_le_bytes());
         sys::send_packet(sock, &req)?;
 
         let mut reply = [0u8; ATTACH_REPLY_BYTES + 1];
@@ -134,7 +140,8 @@ impl Client {
         // grants only what was asked for, so any other bit is an error.
         let caps = r32(ATTACH_REPLY_OFF_CAPABILITIES);
         let doorbell = caps & ATTACH_CAP_DOORBELL != 0;
-        if caps & !ATTACH_CAP_DOORBELL != 0
+        let process_bound = caps & ATTACH_CAP_PROCESS_LIVENESS != 0;
+        if caps & !(ATTACH_CAP_DOORBELL | ATTACH_CAP_PROCESS_LIVENESS) != 0
             || fds.len()
                 != if doorbell {
                     ATTACH_FDS_DOORBELL
@@ -237,7 +244,23 @@ impl Client {
             releases: Mutex::new(VecDeque::new()),
             doorbell,
             wait_lock: Mutex::new(()),
+            process_bound,
+            host_process: sys::peer_process_handle(sock),
+            host_gone: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Whether the host releases this client's slot when its process exits
+    /// (D15), so an idle client need not heartbeat.
+    pub fn has_process_liveness(&self) -> bool {
+        self.process_bound
+    }
+
+    /// Whether both ends watch each other's process (D15): the host releases
+    /// this client on exit, and [`Client::wait`] ends when the host exits. Then
+    /// an idle client may wait indefinitely.
+    pub fn liveness_watched(&self) -> bool {
+        self.process_bound && self.host_process.is_some()
     }
 
     /// Whether the host granted a doorbell (D13).
@@ -279,7 +302,15 @@ impl Client {
             let ms = timeout.map_or(-1, |t| {
                 i32::try_from(t.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX)
             });
-            sys::eventfd_wait(d.own.as_raw_fd(), ms).map_err(RingError::from)
+            let host = self.host_process.as_ref().map(|h| h.as_raw_fd());
+            sys::eventfd_wait_or_exit(d.own.as_raw_fd(), host, ms)
+                .map(|(woken, host_exited)| {
+                    if host_exited {
+                        self.host_gone.store(true, Ordering::Release);
+                    }
+                    woken
+                })
+                .map_err(RingError::from)
         };
         self.qp.set_client_waiting(false);
         woken
@@ -354,9 +385,9 @@ impl Client {
             .min(self.att.slot_size - HDR_LEN as u32)
     }
 
-    /// Whether the host restarted since attach.
+    /// Whether the host restarted since attach, or its process exited (D15).
     pub fn epoch_changed(&self) -> bool {
-        self.control.epoch() != self.att.host_epoch
+        self.control.epoch() != self.att.host_epoch || self.host_gone.load(Ordering::Acquire)
     }
 
     /// Whether the host shed a control-class event to this client (sticky).
@@ -367,7 +398,9 @@ impl Client {
     /// Write a liveness value the host reads; a slot whose heartbeat stops
     /// advancing is reaped.
     pub fn heartbeat(&self, now: u64) {
-        self.qp.set_heartbeat(now);
+        if now != HEARTBEAT_DETACHED {
+            self.qp.set_heartbeat(now);
+        }
     }
 
     /// Heartbeat with the monotonic clock the host's stale checks use.
@@ -632,6 +665,17 @@ impl Client {
         KeepAlive {
             stop,
             thread: Some(thread),
+        }
+    }
+}
+
+/// D15: a dropped client tells the host it left, so the slot is released at
+/// the next pump instead of when a heartbeat would go stale.
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.qp.set_heartbeat(HEARTBEAT_DETACHED);
+        if let Some(d) = &self.doorbell {
+            sys::eventfd_ring(d.host.as_raw_fd());
         }
     }
 }

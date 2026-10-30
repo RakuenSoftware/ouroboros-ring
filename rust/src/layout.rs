@@ -160,6 +160,10 @@ pub(crate) const ATTACH_FD_HOST_DOORBELL: usize = 3;
 pub(crate) const ATTACH_FD_CLIENT_DOORBELL: usize = 4;
 /// Asks for, and grants, a doorbell pair (D13).
 pub(crate) const ATTACH_CAP_DOORBELL: u32 = 0x1;
+/// D15: the host releases the slot when the client's process exits.
+pub(crate) const ATTACH_CAP_PROCESS_LIVENESS: u32 = 0x2;
+/// D15: the heartbeat a detaching client leaves; the host releases the slot.
+pub(crate) const HEARTBEAT_DETACHED: u64 = u64::MAX;
 
 // ---- lease-release payload (D12) ---------------------------------------------
 pub(crate) const LEASE_RELEASE_OFF_LEASE: usize = 0;
@@ -349,6 +353,10 @@ mod tests {
                 ATTACH_FD_CLIENT_DOORBELL as u64,
             ),
             ("attach.cap.doorbell", ATTACH_CAP_DOORBELL.into()),
+            (
+                "attach.cap.process_liveness",
+                ATTACH_CAP_PROCESS_LIVENESS.into(),
+            ),
             ("lease_release.size", LEASE_RELEASE_LEN as u64),
             ("lease_release.off.lease_id", LEASE_RELEASE_OFF_LEASE as u64),
             (

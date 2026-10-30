@@ -725,7 +725,8 @@ pump shares a lock with attach, and the runtime's accept loop blocks in `poll(2)
 retrying every 10ms.
 The module runtimes and callers in all three languages wait on the doorbell. This removes the C
 runtime's unconditional 1ms sleep and the Go `MaxIdlePollInterval` trade-off. Heartbeats keep their
-intervals; on an idle deployment they are the only periodic activity left.
+intervals; on an idle deployment they are the only periodic activity left, until D15 replaces them
+with process handles.
 
 **Threat model (D2).** A client can write the shared host doorbell, so a hostile client can wake the
 host spuriously. That costs it no more than publishing frames, which it may already do at any rate,
@@ -759,6 +760,54 @@ stage, each of those asks is a durable audit row.
   `ConcurrentModuleCaller.Publish`, Rust through the client its `started` hook receives, C through
   `ouro_client_publish` on the loop's client. A full outbound ring is backpressure from the host;
   the publisher retries until its context ends.
+
+## D15: Liveness is the process, not a timer
+
+*Added 2026-10-30, after v0. One attach capability bit and one queue-pair value; `layout_version`
+stays 1.*
+
+**Decision: a host that can hold an OS handle on a client's process releases that client's slot
+when the process exits, and grants it `OURO_ATTACH_CAP_PROCESS_LIVENESS`. A client holding the
+grant does not heartbeat while idle. A client also holds a handle on the host's process, and the
+host's exit ends its wait. A client that detaches says so. With all three, an idle deployment makes
+no periodic wakeups at all.**
+
+After D13 the only periodic activity on an idle deployment was liveness: every client advanced
+`client_heartbeat` on a timer (five seconds in the reference runtimes), and the host swept for
+stale heartbeats on another. That is still polling: each idle process woke on a clock to prove
+something the kernel already knows. It also left two gaps. A crashed client held its slot until the
+stale window passed (30 seconds in the reference deployment), during which its served kinds stayed
+routed to nobody. And a client asleep on its doorbell noticed a dead host only when its timeout
+expired.
+
+- **Host side.** At admission the host's runtime opens a process handle on the peer of the attach
+  socket (on Linux, `pidfd_open` of its `SO_PEERCRED` pid). If it gets one, it marks the slot
+  process-bound (`ouro_host_bind_process`) and watches the handle in the same `poll(2)` as the
+  listener. When the handle becomes readable, the process has exited and the slot is released at
+  once, exactly as a reap would release it. Heartbeat reaping passes process-bound slots by, and
+  `ouro_runtime_maintenance_due` reports whether any slot still needs the reap timer. An owner may
+  sleep without one when none does; an admission wakes the host doorbell so it re-evaluates.
+- **Negotiation.** A D15 client sets bit 1 of the attach request's `capabilities`. The host grants
+  it only for a process-bound slot. Granting it says "this slot's liveness is the process", so the
+  client may stop heartbeating on a timer. A client that is not granted it keeps heartbeating, so an
+  older host, or a platform with no process handles, behaves as before. An older client never asks,
+  heartbeats anyway, and is still released on exit.
+- **Detach.** A detaching client stores `OURO_HEARTBEAT_DETACHED` (all ones, which no clock
+  reading is) in `client_heartbeat` before unmapping, and rings the host doorbell. The host's next
+  pump drains what that client had queued and releases the slot; a reap releases it too. Before
+  this a detached slot was reclaimed only when its heartbeat went stale. For a process-bound client
+  whose process lives on, the detach is now the only release.
+- **Client side.** At attach the client opens a process handle on the host (the peer of the same
+  socket) and adds it to its doorbell wait. If the host exits, the wait returns and
+  `epoch_changed` reports true, which every loop already treats as "the host is gone". A client
+  with both ends watched (`ouro_client_liveness_watched`, `Client.HasProcessLiveness` with a host
+  handle, `Client::liveness_watched`) may wait with no timeout while idle; the reference module
+  runtimes do.
+
+**Threat model (D2).** The process handle is taken by the host from kernel-attested credentials
+(`SO_PEERCRED`), never from anything the client sends, so a client cannot bind its slot to another
+process. A client that writes `OURO_HEARTBEAT_DETACHED` only releases its own slot, which it could
+already do by exiting. A client that stops heartbeating without the grant is reaped as before.
 
 ---
 

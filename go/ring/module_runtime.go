@@ -382,6 +382,11 @@ func runModuleClient(ctx context.Context, config ModuleProcessConfig, stages map
 	// D13: sleep on the doorbell when the host granted one. A finished handler
 	// and shutdown interrupt the wait; nothing else needs a timer.
 	bell, _ := client.(doorbellRing)
+	// D15: with the host watching this process, idle needs no heartbeat.
+	idleWait := moduleIdleWait
+	if live, ok := client.(interface{ HasProcessLiveness() bool }); ok && live.HasProcessLiveness() {
+		idleWait = -1
+	}
 	if bell != nil {
 		stop := make(chan struct{})
 		defer close(stop)
@@ -445,7 +450,7 @@ func runModuleClient(ctx context.Context, config ModuleProcessConfig, stages map
 		}
 		if !ok {
 			if bell != nil {
-				if _, err := bell.Wait(moduleIdleWait); err == nil {
+				if _, err := bell.Wait(idleWait); err == nil {
 					continue // the top of the loop drains finished handlers
 				} else if !errors.Is(err, ErrNoDoorbell) {
 					return err

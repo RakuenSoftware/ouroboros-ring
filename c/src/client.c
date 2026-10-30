@@ -1,13 +1,32 @@
 /* ouro_client.c: the C reference ring client. See ouro_client.h. */
+#define _GNU_SOURCE 1
 #include <errno.h>
 #include <poll.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <ouroboros/client.h>
 #include <ouroboros/ring.h>
+
+/* D15: a process handle on the peer at the other end of the attach socket. */
+static int peer_process_handle(int sock)
+{
+#if defined(__linux__) && defined(SO_PEERCRED) && defined(SYS_pidfd_open)
+   struct ucred peer;
+   socklen_t size = sizeof peer;
+   if (getsockopt(sock, SOL_SOCKET, SO_PEERCRED, &peer, &size) != 0 || size != sizeof peer ||
+       peer.pid <= 0)
+      return -1;
+   return (int)syscall(SYS_pidfd_open, peer.pid, 0);
+#else
+   (void)sock;
+   return -1;
+#endif
+}
 
 ouro_client_result_t ouro_client_attach(int sock, ouro_client_t *c)
 {
@@ -20,7 +39,7 @@ ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t 
    if (!c || sock < 0)
       return OURO_CLIENT_ERR_ARG;
    memset(c, 0, sizeof *c);
-   c->host_doorbell_fd = c->doorbell_fd = -1;
+   c->host_doorbell_fd = c->doorbell_fd = c->host_pidfd = -1;
 
    ouro_attach_request_t req;
    memset(&req, 0, sizeof req);
@@ -29,8 +48,8 @@ ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t 
    req.wire_version_max = OURO_WIRE_VERSION;
    req.principal_class = principal_class;
    req.principal_ref = principal_ref;
-   /* D13: an older host reads only the first 16 bytes and grants no doorbell. */
-   req.capabilities = OURO_ATTACH_CAP_DOORBELL;
+   /* D13/D15: an older host reads only the first 16 bytes and grants neither. */
+   req.capabilities = OURO_ATTACH_CAP_DOORBELL | OURO_ATTACH_CAP_PROCESS_LIVENESS;
    if (ouro_fd_send(sock, &req, sizeof req, NULL, 0) != 0)
       return OURO_CLIENT_ERR_OS;
 
@@ -54,7 +73,8 @@ ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t 
    /* The grant's capabilities and its descriptor count must agree. A host
     * grants only what was asked for, so any other bit is a protocol error. */
    int doorbell = (c->reply.capabilities & OURO_ATTACH_CAP_DOORBELL) != 0;
-   if ((c->reply.capabilities & ~OURO_ATTACH_CAP_DOORBELL) != 0 ||
+   if ((c->reply.capabilities & ~(OURO_ATTACH_CAP_DOORBELL | OURO_ATTACH_CAP_PROCESS_LIVENESS)) !=
+           0 ||
        nfd != (doorbell ? OURO_ATTACH_FDS_DOORBELL : OURO_ATTACH_FDS))
    {
       for (int i = 0; i < nfd; i++)
@@ -103,6 +123,7 @@ ouro_client_result_t ouro_client_attach_as(int sock, ouro_client_t *c, uint32_t 
    }
 
    c->attached_epoch = c->reply.host_epoch;
+   c->host_pidfd = peer_process_handle(sock);
    rc = OURO_CLIENT_OK;
 
 done:
@@ -116,10 +137,21 @@ done:
    return rc;
 }
 
+static void doorbell_ring(int fd);
+
 void ouro_client_detach(ouro_client_t *c)
 {
    if (!c)
       return;
+   /* D15: say so, so the host releases the slot now rather than when the
+    * heartbeat would have gone stale (or, for a process-bound slot, never). */
+   if (c->qp.hdr)
+   {
+      atomic_store_explicit(&c->qp.hdr->client_heartbeat, OURO_HEARTBEAT_DETACHED,
+                            memory_order_release);
+      if (c->have_doorbell)
+         doorbell_ring(c->host_doorbell_fd);
+   }
    ouro_region_unmap(&c->control);
    ouro_region_unmap(&c->arena);
    ouro_region_unmap(&c->qpair);
@@ -128,8 +160,10 @@ void ouro_client_detach(ouro_client_t *c)
       close(c->host_doorbell_fd);
       close(c->doorbell_fd);
    }
+   if (c->host_pidfd >= 0)
+      close(c->host_pidfd);
    memset(c, 0, sizeof *c);
-   c->host_doorbell_fd = c->doorbell_fd = -1;
+   c->host_doorbell_fd = c->doorbell_fd = c->host_pidfd = -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -170,17 +204,21 @@ int ouro_client_wait(ouro_client_t *c, int timeout_ms)
       atomic_store_explicit(&c->qp.hdr->client_waiting, 0, memory_order_relaxed);
       return 1;
    }
-   struct pollfd p = {.fd = c->doorbell_fd, .events = POLLIN};
+   /* D15: the host's exit wakes the wait too, and reads as an epoch change. */
+   struct pollfd p[2] = {{.fd = c->doorbell_fd, .events = POLLIN},
+                         {.fd = c->host_pidfd, .events = POLLIN}};
    int rc;
    /* EINTR ends the wait as a timeout: a signal-driven stop must not wait
     * out the whole timeout. */
-   rc = poll(&p, 1, timeout_ms);
-   if (rc > 0)
+   rc = poll(p, c->host_pidfd >= 0 ? 2 : 1, timeout_ms);
+   if (rc > 0 && (p[0].revents & POLLIN))
    {
       uint64_t count;
       while (read(c->doorbell_fd, &count, sizeof count) < 0 && errno == EINTR)
          ;
    }
+   if (rc > 0 && c->host_pidfd >= 0 && p[1].revents)
+      atomic_store_explicit(&c->host_gone, 1, memory_order_release);
    atomic_store_explicit(&c->qp.hdr->client_waiting, 0, memory_order_relaxed);
    return rc > 0 ? 1 : 0;
 }
@@ -189,6 +227,11 @@ void ouro_client_interrupt(ouro_client_t *c)
 {
    if (c && c->have_doorbell)
       doorbell_ring(c->doorbell_fd);
+}
+
+int ouro_client_process_liveness(const ouro_client_t *c)
+{
+   return c && (c->reply.capabilities & OURO_ATTACH_CAP_PROCESS_LIVENESS) != 0;
 }
 
 int ouro_client_doorbell_fd(const ouro_client_t *c)
@@ -431,13 +474,20 @@ ouro_client_result_t ouro_client_poll(ouro_client_t *c, ouro_event_t *out)
 
 void ouro_client_heartbeat(ouro_client_t *c, uint64_t now)
 {
-   if (c && c->qp.hdr)
+   if (c && c->qp.hdr && now != OURO_HEARTBEAT_DETACHED)
       atomic_store_explicit(&c->qp.hdr->client_heartbeat, now, memory_order_release);
 }
 
 int ouro_client_epoch_changed(const ouro_client_t *c)
 {
-   return c && c->ctl && ouro_control_epoch_changed(c->ctl, c->attached_epoch);
+   return c && c->ctl &&
+          (ouro_control_epoch_changed(c->ctl, c->attached_epoch) ||
+           atomic_load_explicit(&c->host_gone, memory_order_acquire));
+}
+
+int ouro_client_liveness_watched(const ouro_client_t *c)
+{
+   return ouro_client_process_liveness(c) && c->host_pidfd >= 0;
 }
 
 int ouro_client_control_lost(const ouro_client_t *c)

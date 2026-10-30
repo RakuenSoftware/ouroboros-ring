@@ -171,6 +171,11 @@ pub trait ModuleRing {
     fn waker(&self) -> Option<Waker> {
         None
     }
+    /// D15: whether host and client watch each other's process, so an idle
+    /// wait needs no heartbeat bound.
+    fn liveness_watched(&self) -> bool {
+        false
+    }
 }
 
 impl ModuleRing for Client {
@@ -197,6 +202,9 @@ impl ModuleRing for Client {
     }
     fn wait(&self, timeout: Duration) -> Result<bool, RingError> {
         Client::wait(self, Some(timeout))
+    }
+    fn liveness_watched(&self) -> bool {
+        Client::liveness_watched(self)
     }
     fn waker(&self) -> Option<Waker> {
         Client::waker(self)
@@ -382,7 +390,13 @@ fn serve<B: ModuleRing>(
         let event = match bus.poll() {
             Ok(Some(ev)) => ev,
             Ok(None) => {
-                match bus.wait(IDLE_WAIT) {
+                // D15: with both processes watched, idle needs no heartbeat.
+                let bound = if bus.liveness_watched() {
+                    Duration::MAX
+                } else {
+                    IDLE_WAIT
+                };
+                match bus.wait(bound) {
                     // The top of the loop drains finished handlers.
                     Ok(_) => continue,
                     Err(RingError::NoDoorbell) => {}

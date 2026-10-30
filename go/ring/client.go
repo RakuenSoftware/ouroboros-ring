@@ -49,6 +49,13 @@ const (
 
 	// attachCapDoorbell asks for, and grants, a doorbell pair (D13).
 	attachCapDoorbell uint32 = 0x1
+	// attachCapProcessLiveness (D15): the host holds a handle on this
+	// process and releases the slot when it exits, so no timer heartbeat.
+	attachCapProcessLiveness uint32 = 0x2
+
+	// heartbeatDetached is the client_heartbeat a detaching client leaves
+	// (D15): the host releases the slot at its next pump.
+	heartbeatDetached = ^uint64(0)
 )
 
 // AttachStatus mirrors ouro_attach_status_t.
@@ -137,6 +144,9 @@ type Client struct {
 	haveDoorbell bool
 	hostDoorbell int
 	doorbell     int
+
+	// D15: the host watches this process, so idling needs no heartbeat.
+	processBound bool
 }
 
 // leaseRef names an arena consumer ref the client owes back to the host.
@@ -183,8 +193,9 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 	binary.LittleEndian.PutUint16(req[attachReqOffWireMax:], WireVersion)
 	binary.LittleEndian.PutUint32(req[attachReqOffPrincipalClass:], principalClass)
 	binary.LittleEndian.PutUint32(req[attachReqOffPrincipalRef:], principalRef)
-	// D13: an older host reads only the first 16 bytes and grants no doorbell.
-	binary.LittleEndian.PutUint32(req[attachReqOffCapabilities:], attachCapDoorbell)
+	// D13/D15: an older host reads only the first 16 bytes and grants neither.
+	binary.LittleEndian.PutUint32(req[attachReqOffCapabilities:],
+		attachCapDoorbell|attachCapProcessLiveness)
 	if err := unix.Sendmsg(sock, req[:], nil, nil, 0); err != nil {
 		return nil, err
 	}
@@ -218,7 +229,7 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 	if doorbell {
 		wantFds = attachDescriptorsDoorbell
 	}
-	if caps&^attachCapDoorbell != 0 || len(fds) != wantFds {
+	if caps&^(attachCapDoorbell|attachCapProcessLiveness) != 0 || len(fds) != wantFds {
 		closeAll()
 		return nil, ErrProtocol
 	}
@@ -231,6 +242,7 @@ func AttachAs(sock int, principalClass uint32, principalRef uint32) (*Client, er
 		queueCapacity: binary.LittleEndian.Uint32(replyBuf[attachReplyOffQueueCap:]),
 		arenaSize:     binary.LittleEndian.Uint64(replyBuf[attachReplyOffArena:]),
 		attachedEpoch: binary.LittleEndian.Uint64(replyBuf[attachReplyOffEpoch:]),
+		processBound:  caps&attachCapProcessLiveness != 0,
 	}
 
 	if binary.LittleEndian.Uint32(replyBuf[attachReplyOffWireVersion:]) != uint32(WireVersion) ||
@@ -359,8 +371,14 @@ func (c *Client) FlushReleases() error {
 	return nil
 }
 
-// Detach unmaps the regions.
+// Detach tells the host it is leaving (D15), then unmaps the regions.
 func (c *Client) Detach() {
+	if c.qp != nil && c.qpMem != nil {
+		c.qp.SetHeartbeat(heartbeatDetached)
+		if c.haveDoorbell {
+			ringDoorbell(c.hostDoorbell)
+		}
+	}
 	if c.ctlMem != nil {
 		unix.Munmap(c.ctlMem)
 		c.ctlMem = nil
@@ -454,13 +472,21 @@ func (c *Client) Interrupt() {
 // HasDoorbell reports whether the host granted a doorbell (D13).
 func (c *Client) HasDoorbell() bool { return c != nil && c.haveDoorbell }
 
+// HasProcessLiveness reports whether the host releases this client's slot when
+// its process exits (D15), so the client need not heartbeat while idle.
+func (c *Client) HasProcessLiveness() bool { return c != nil && c.processBound }
+
 // EpochChanged reports whether the host has restarted since attach.
 func (c *Client) EpochChanged() bool {
 	return c.control != nil && c.control.Epoch() != c.attachedEpoch
 }
 
 // Heartbeat writes a liveness value the host reads.
-func (c *Client) Heartbeat(now uint64) { c.qp.SetHeartbeat(now) }
+func (c *Client) Heartbeat(now uint64) {
+	if now != heartbeatDetached {
+		c.qp.SetHeartbeat(now)
+	}
+}
 
 // ControlLost reports the sticky control_lost flag.
 func (c *Client) ControlLost() bool { return c.qp.ControlLost() }

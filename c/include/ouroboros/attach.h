@@ -22,6 +22,9 @@
 
 /* Attach capabilities (D13): requested in the request, granted in the reply. */
 #define OURO_ATTACH_CAP_DOORBELL 0x00000001u
+/* D15: the host holds an OS handle on the client's process and releases its slot
+ * when the process exits, so the client need not heartbeat on a timer. */
+#define OURO_ATTACH_CAP_PROCESS_LIVENESS 0x00000002u
 
 /* The v0 request was the first 16 bytes of ouro_attach_request_t. A host still
  * accepts it, and an older host reads only those 16 bytes of a longer one. */

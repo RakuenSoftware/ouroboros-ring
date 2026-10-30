@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,10 @@ func TestCrossLanguageConformance(t *testing.T) {
 	defer func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		// D15: a process-bound client must announce its detach.
+		if strings.Contains(out.String(), "without announcing its detach") {
+			t.Error("the Go client left the C host without announcing its detach")
+		}
 		if t.Failed() {
 			t.Logf("harness output:\n%s", out.String())
 		}
@@ -276,6 +281,10 @@ func TestCrossLanguageConformance(t *testing.T) {
 	// the host, which sleeps up to a second between pumps.
 	if !c.HasDoorbell() {
 		t.Fatal("the C host granted no doorbell")
+	}
+	// D15: the C host bound this client to its process.
+	if !c.HasProcessLiveness() {
+		t.Fatal("the C host granted no process liveness")
 	}
 	if woke, err := c.Wait(30 * time.Millisecond); err != nil || woke {
 		t.Fatalf("idle wait = %v, %v; want a timeout", woke, err)

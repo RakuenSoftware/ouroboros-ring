@@ -58,7 +58,9 @@ Some changes need none of these:
   added this way: `OURO_CONTROL_F_LEASE_VIEW`, with its slot count and offset in
   fields that every earlier host left zero. So were doorbells (D13):
   `OURO_CONTROL_F_DOORBELL`, the two waiting flags, and an attach request that
-  grew by a `capabilities` word an older host never reads.
+  grew by a `capabilities` word an older host never reads. Process liveness
+  (D15) is one more bit in that word and one reserved `client_heartbeat` value,
+  `OURO_HEARTBEAT_DETACHED`, which no clock reading takes.
 
 A host and client agree the wire version at attach
 ([attach and admission](attach-and-admission.md)). Capture files carry their

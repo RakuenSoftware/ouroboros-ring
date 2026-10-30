@@ -93,6 +93,10 @@ typedef struct
    /* D13: this client's doorbell, which the host writes and the client reads;
     * -1 when the client asked for none. */
    int doorbell_fd;
+
+   /* D15: the runtime holds a process handle for this client and releases the
+    * slot when the process exits, so the heartbeat reap passes it by. */
+   int process_bound;
 } ouro_slot_t;
 
 /* Per-kind overflow policy (D5). Block is the safe default: a full destination
@@ -248,6 +252,17 @@ ouro_host_result_t ouro_host_serve_attach_owned(ouro_host_t *h, int conn_fd);
  * attach, pump, and reap. */
 ouro_host_result_t ouro_host_release_slot(ouro_host_t *h, uint32_t slot);
 
+/* D15. Mark an admitted slot as bound to a process handle its owner watches:
+ * the heartbeat reap passes it by, and a client that asked for
+ * OURO_ATTACH_CAP_PROCESS_LIVENESS is granted it. Called from the attach hook
+ * (or with the host lock held). */
+ouro_host_result_t ouro_host_bind_process(ouro_host_t *h, uint32_t slot);
+
+/* The number of admitted slots whose liveness is the heartbeat, which only a
+ * periodic ouro_host_reap can notice ending. Zero means reaping has nothing to
+ * do until another client attaches. Caller holds the host lock. */
+uint32_t ouro_host_heartbeat_slots(const ouro_host_t *h);
+
 /* Install the daemon-owned capability binder. Admission authenticates the
  * request before allocation; this hook runs after a slot exists but before its
  * descriptors are granted, and may subscribe/serve only the kinds authorized
@@ -259,7 +274,8 @@ void ouro_host_set_attach_hook(ouro_host_t *h,
                                                           const ouro_attach_request_t *request),
                               void *ctx);
 
-/* Reap slots whose client heartbeat has not advanced within stale_ns. Releases
+/* Reap slots whose client heartbeat has not advanced within stale_ns (D15:
+ * process-bound slots excepted; their owner releases them on exit). Releases
  * the slot's arena leases (producer and consumer), unmaps and closes its
  * queue-pair region, and frees the slot. `now` and the recorded timestamps share
  * an arbitrary monotonic clock the caller supplies. Returns the number reaped. */

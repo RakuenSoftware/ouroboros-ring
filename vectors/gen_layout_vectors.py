@@ -121,6 +121,7 @@ struct("attach_request", 20, [
 ])
 row("attach_request.v0_size", 16, "D13: a host accepts the 16-byte v0 request too")
 row("attach.cap.doorbell", 0x1, "D13: request and grant a doorbell pair")
+row("attach.cap.process_liveness", 0x2, "D15: the host releases the slot when the client process exits")
 row("attach_reply.magic", le_magic("ABRP"))
 struct("attach_reply", 48, [
     ("magic", 4), ("status", 4), ("handle_id", 4), ("wire_version", 4),

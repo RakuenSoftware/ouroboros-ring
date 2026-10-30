@@ -105,6 +105,7 @@ func goLayout() map[string]uint64 {
 		"attach_request.off.capabilities":     attachReqOffCapabilities,
 		"attach_request.v0_size":              attachReqV0Bytes,
 		"attach.cap.doorbell":                 uint64(attachCapDoorbell),
+		"attach.cap.process_liveness":         uint64(attachCapProcessLiveness),
 		"attach_reply.magic":                  uint64(attachReplyMagic),
 		"attach_reply.size":                   attachReplyBytes,
 		"attach_reply.off.magic":              attachReplyOffMagic,

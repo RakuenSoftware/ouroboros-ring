@@ -911,6 +911,12 @@ uint32_t ouro_host_pump(ouro_host_t *h)
        * for room. Routing can have reaped the slot, so check it is still live. */
       if (slot->in_use && ouro_ring_count(&slot->qpair.outbound) < queued)
          ouro_host_signal_slot(slot);
+      /* D15: a client that detached left its mark; what it queued was drained
+       * above, so the slot goes now, not when a heartbeat would go stale. */
+      if (slot->in_use && !slot->blocked &&
+          atomic_load_explicit(&slot->qpair.hdr->client_heartbeat, memory_order_acquire) ==
+              OURO_HEARTBEAT_DETACHED)
+         (void)ouro_host_release_slot(h, s);
    }
    return routed;
 }

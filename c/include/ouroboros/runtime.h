@@ -56,6 +56,11 @@ void ouro_runtime_stop(ouro_runtime_t **runtime);
 /* Call periodically while holding host_lock. Updates the host heartbeat and
  * reaps clients whose own heartbeat stopped advancing. */
 uint32_t ouro_runtime_maintain(ouro_runtime_t *runtime, uint64_t now_ns);
+/* D15: whether ouro_runtime_maintain has anything to watch. 0 when every
+ * admitted client is bound to a process handle the runtime releases on exit, so
+ * the owner may sleep until woken; a later attach wakes the host doorbell.
+ * Caller holds the host lock. */
+int ouro_runtime_maintenance_due(const ouro_runtime_t *runtime);
 uint64_t ouro_runtime_monotonic_ns(void);
 
 /* Strict deployment policy: one *.grant file per installed module. A missing

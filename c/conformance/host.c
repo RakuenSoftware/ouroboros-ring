@@ -28,6 +28,10 @@
  *     client's wakeup is observable. The host itself sleeps on its doorbell for
  *     up to a second between pumps, so any prompt answer to an external publish
  *     proves the external client rang it.
+ *   - D15: the host binds each external client to its process and grants
+ *     process liveness; the client's slot is never stale-reaped, so the next
+ *     client getting the freed slot proves the departing one announced its
+ *     detach.
  *
  * Usage: ouroboros-ring-conformance-host <socket-path> [timeout-ms]
  * It listens, accepts exactly one external client, pumps and services until the
@@ -149,6 +153,28 @@ static int attach_internal(ouro_host_t *h, ouro_client_t *c)
 }
 
 /* Find the one admitted slot that is not the internal client's. */
+/* D15: the admitting peer's credentials were readable, so the slot can be
+ * bound to its process (a runtime would also watch the process handle). */
+static int g_peer_known;
+
+static ouro_attach_status_t admit_peer(void *ctx, int fd, const ouro_attach_request_t *request)
+{
+   (void)ctx, (void)request;
+   struct ucred peer;
+   socklen_t size = sizeof peer;
+   g_peer_known = getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &size) == 0 && peer.pid > 0;
+   return OURO_ATTACH_OK;
+}
+
+static ouro_attach_status_t bind_peer(void *ctx, ouro_host_t *h, uint32_t slot,
+                                      const ouro_attach_request_t *request)
+{
+   (void)ctx, (void)request;
+   if (g_peer_known)
+      (void)ouro_host_bind_process(h, slot);
+   return OURO_ATTACH_OK;
+}
+
 static int find_external(ouro_host_t *h, uint32_t internal_handle)
 {
    for (uint32_t i = 0; i < h->cfg.max_slots; i++)
@@ -176,7 +202,7 @@ int main(int argc, char **argv)
    cfg.arena_size = 256 * 1024;
 
    ouro_host_t h;
-   if (ouro_host_create(&h, &cfg, NULL, NULL) != OURO_HOST_OK)
+   if (ouro_host_create(&h, &cfg, admit_peer, NULL) != OURO_HOST_OK)
    {
       fprintf(stderr, "host create failed\n");
       return 1;
@@ -189,6 +215,8 @@ int main(int argc, char **argv)
       fprintf(stderr, "internal client attach failed\n");
       return 1;
    }
+   /* External clients only: the internal one proves heartbeat liveness. */
+   ouro_host_set_attach_hook(&h, bind_peer, NULL);
    ouro_host_subscribe(&h, cc.reply.handle_id, KIND_NOTIFY);
    ouro_host_subscribe(&h, cc.reply.handle_id, KIND_DOORBELL_ASK);
    ouro_host_serve_kind(&h, cc.reply.handle_id, KIND_ECHO);
@@ -352,17 +380,25 @@ int main(int argc, char **argv)
          if (pr == 0)
          {
             close(csock);
-            /* Drive the reaper: the external client never heartbeat. The first
-             * tick starts its stale clock; the second, past the window, collects
-             * it. The internal server heartbeats before each tick so the blanket
-             * reap never mistakes it for dead. */
+            /* D15: a process-bound client is never stale-reaped; it announced
+             * its detach, which the pump acts on. */
+            ouro_host_pump(&h);
+            if (h.slots[ext].in_use && h.slots[ext].process_bound)
+            {
+               fprintf(stderr, "error: external client left without announcing its detach\n");
+               (void)ouro_host_release_slot(&h, (uint32_t)ext);
+            }
+            /* A heartbeat-bound client: drive the reaper. The first tick starts
+             * its stale clock; the second, past the window, collects it. The
+             * internal server heartbeats before each tick so the blanket reap
+             * never mistakes it for dead. */
             ouro_client_heartbeat(&cc, ++cc_hb);
             hostclock += 1000;
             ouro_host_reap(&h, hostclock, 1);
             ouro_client_heartbeat(&cc, ++cc_hb);
             hostclock += 1000;
-            uint32_t reaped = ouro_host_reap(&h, hostclock, 1);
-            if (reaped == 0)
+            ouro_host_reap(&h, hostclock, 1);
+            if (h.slots[ext].in_use)
                fprintf(stderr, "warning: external client not reaped\n");
             break;
          }

@@ -59,6 +59,10 @@ sequenceDiagram
   ([D13](../spec/decisions.md#d13-doorbells-idle-ends-sleep-in-the-kernel)).
   The request is 20 bytes; a host also accepts the 16-byte request that predates
   `capabilities`, and an older host reads only those 16 bytes of a newer one.
+  `OURO_ATTACH_CAP_PROCESS_LIVENESS` (bit 1) is granted when the attach hook
+  bound the slot to the client's process (`ouro_host_bind_process`), and tells
+  the client it need not heartbeat
+  ([D15](../spec/decisions.md#d15-liveness-is-the-process-not-a-timer)).
 
 The client reads its geometry from the reply and the control region. It is
 never compiled against those values, which is why the host can re-tune them
@@ -100,7 +104,8 @@ flowchart TB
     peer -- yes --> dup{"a live slot already<br/>holds this principal?"}
     dup -- "yes, and its process<br/>is still running" --> deny
     dup -- "no, or its process has exited<br/>(pidfd)" --> bind["release the stale slot if any,<br/>enforce grants, subscribe,<br/>serve, grant outbound kinds"]
-    bind --> ok["OK: reply + three descriptors<br/>(five with a doorbell)"]
+    bind --> live["bind the slot to the peer's pidfd<br/>(D15: released when it exits)"]
+    live --> ok["OK: reply + three descriptors<br/>(five with a doorbell)"]
 ```
 
 A grant is one file per installed program in a policy directory

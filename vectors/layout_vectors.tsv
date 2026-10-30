@@ -83,6 +83,7 @@ attach_request.off.capabilities	16
 attach_request.size	20
 attach_request.v0_size	16
 attach.cap.doorbell	1
+attach.cap.process_liveness	2
 attach_reply.magic	0x50524241
 attach_reply.off.magic	0x00000000
 attach_reply.off.status	4

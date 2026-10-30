@@ -287,6 +287,11 @@ fn rust_client_against_c_host() {
     // woken by the C side's delayed publish, and its own publish wakes the
     // host, which sleeps up to a second between pumps.
     assert!(c.has_doorbell(), "the C host granted no doorbell");
+    // D15: the C host bound this client to its process.
+    assert!(
+        c.has_process_liveness(),
+        "the C host granted no process liveness"
+    );
     assert!(
         !c.wait(Some(Duration::from_millis(30))).unwrap(),
         "an idle wait times out"
