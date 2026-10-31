@@ -25,7 +25,7 @@ sequenceDiagram
         H->>H: allocate a directory slot, create its queue-pair memfd
         H->>B: bind(ctx, host, slot, request)
         B-->>H: OK (subscriptions, served kinds, outbound grants set)
-        H-->>C: reply (magic ABRP, OK, handle, negotiated version, granted capabilities, geometry, host_epoch)<br/>+ SCM_RIGHTS: control, arena, queue pair (+ host and client doorbells)
+        H-->>C: reply (magic ABRP, OK, handle, negotiated version, granted capabilities, geometry, host_epoch)<br/>+ SCM_RIGHTS: control, arena, queue pair (+ host and client doorbells) (+ telemetry region and doorbell)
         C->>C: map control read-only, arena and queue pair read/write
     else refused at either hook
         H->>H: roll the slot back
@@ -63,6 +63,11 @@ sequenceDiagram
   bound the slot to the client's process (`ouro_host_bind_process`), and tells
   the client it need not heartbeat
   ([D15](../spec/decisions.md#d15-liveness-is-the-process-not-a-timer)).
+  `OURO_ATTACH_CAP_TELEMETRY` (bit 2), asked for together with bit 0, adds two
+  more descriptors, the telemetry region and its doorbell, for the one slot the
+  embedding granted it ([telemetry](telemetry.md#granting-it)). A reply's
+  descriptor count is therefore 3, 5 or 7, and always matches its
+  `capabilities`.
 
 The client reads its geometry from the reply and the control region. It is
 never compiled against those values, which is why the host can re-tune them
@@ -105,7 +110,7 @@ flowchart TB
     dup -- "yes, and its process<br/>is still running" --> deny
     dup -- "no, or its process has exited<br/>(pidfd)" --> bind["release the stale slot if any,<br/>enforce grants, subscribe,<br/>serve, grant outbound kinds"]
     bind --> live["bind the slot to the peer's pidfd<br/>(D15: released when it exits)"]
-    live --> ok["OK: reply + three descriptors<br/>(five with a doorbell)"]
+    live --> ok["OK: reply + three descriptors<br/>(five with a doorbell,<br/>seven with telemetry)"]
 ```
 
 A grant is one file per installed program in a policy directory
@@ -133,14 +138,18 @@ host hands its telemetry ring
 ([telemetry](telemetry.md), [D16](../spec/decisions.md#d16-tap-telemetry-leaves-the-host-the-moment-an-event-is-stamped)).
 The host still grants it only while no other live slot holds it.
 
-The listener also handles the case heartbeats alone handle badly. A process that
+The listener also handles the case heartbeats alone handle badly: a process that
 crashes cannot detach its slot, and its supervisor may restart it at once. When
-the kernel supports `pidfd`, the runtime keeps a handle on each admitted
-process: a new attach for a principal whose previous holder has exited releases
-the stale slot immediately, while a live duplicate is still refused. Without
-`pidfd` the stale slot waits for heartbeat reaping. `ouro_runtime_maintain`,
-called periodically under the host lock, advances the host heartbeat and reaps
-slots whose client heartbeat has stopped.
+the kernel supports `pidfd`, the runtime keeps a handle on each admitted process
+and watches it in the same `poll(2)` as the socket, so the slot is released the
+moment the process exits
+([D15](../spec/decisions.md#d15-liveness-is-the-process-not-a-timer)). A restarted
+process therefore finds its principal free, while a live duplicate is still
+refused. Without `pidfd` the stale slot waits for heartbeat reaping.
+`ouro_runtime_maintain`, called under the host lock, advances the host
+heartbeat and reaps slots whose client heartbeat has stopped;
+`ouro_runtime_maintenance_due` says whether any slot still needs it, and when
+none does the owner can sleep with no reap timer.
 
 `refused_role_refs` lets a host that composes several ring instances refuse
 role identities that belong to another instance, so a role cannot attach where
@@ -160,9 +169,14 @@ lock. This is a convenience of the C implementation, not part of the contract.
 ## Detach, reap and restart
 
 - A client that is done calls `ouro_client_detach` (or its Go and Rust
-  equivalents) and closes its socket.
-- A client whose heartbeat stops is reaped. Reaping drops every arena reference
-  the slot holds, discards its rings, and frees the slot. An event that was
-  blocked in flight for a reaped producer becomes a `producer_reaped` record.
+  equivalents). The detach is announced: the client marks its heartbeat
+  `OURO_HEARTBEAT_DETACHED` and rings the host, whose next pump drains what the
+  client queued and releases the slot.
+- A process-bound client whose process exits is released at once, and is never
+  reaped for a stale heartbeat.
+- Any other client whose heartbeat stops is reaped.
+- Releasing a slot, by any of these, drops every arena reference it holds,
+  discards its rings and frees it. An event that was blocked in flight for a
+  released producer becomes a `producer_reaped` record.
 - `ouro_host_bump_epoch` (or a host restart) changes `host_epoch`. Every
   client sees `epoch_changed`, every mapping is stale, and clients re-attach.

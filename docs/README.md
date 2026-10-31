@@ -16,6 +16,9 @@ could disagree.
 | [Telemetry](telemetry.md) | every stamped event described off the host at once: the record, the hand-off to one exporter process, loss, and the reference OTLP exporter |
 | [Implementations and conformance](implementations-and-conformance.md) | what C, Go and Rust each provide, the evidence that holds them to the contract, and adding a language |
 | [Versions and releases](versions-and-releases.md) | release tags, the contract's own version numbers, and how consumers pin a release |
+| [Performance](performance.md) | what the benchmark measures, why a number belongs to its machine, and what the budget enforces |
+| [Configuration](configuration.md) | every environment variable, flag and build option the implementations read |
+| [Changelog](../CHANGELOG.md) | what each release changed for a consumer |
 
 New to the ring: read the architecture page, then whichever of the others
 matches what you are building. Implementing the ring in another language: read

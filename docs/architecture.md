@@ -55,10 +55,14 @@ the kernel, not the client library, decides what a client can see
 flowchart TB
     subgraph host["Host address space"]
         DIR["queue directory<br/>(ordinary private memory:<br/>slot → handle, principal, grants)"]
-        CTL["control region<br/>magic · versions · geometry ·<br/>host_epoch · host_heartbeat ·<br/>lease view (D12)"]
+        CTL["control region<br/>magic · versions · geometry ·<br/>host_epoch · host_heartbeat ·<br/>host_waiting · lease view (D12)"]
         ARENA["arena region<br/>payload spans, by (offset, len)"]
-        QA["queue pair, slot 0<br/>inbound ring · outbound ring ·<br/>credits · heartbeat · control_lost"]
+        QA["queue pair, slot 0<br/>inbound ring · outbound ring ·<br/>credits · heartbeat · control_lost ·<br/>client_waiting"]
         QB["queue pair, slot 1"]
+        TLM["telemetry region (D16, if enabled)<br/>pacing · consumer_waiting ·<br/>ring of records"]
+    end
+    subgraph exporter["Telemetry exporter"]
+        X1["telemetry region"]
     end
     subgraph ca["Client A"]
         CA1["control (read-only)"]
@@ -76,19 +80,28 @@ flowchart TB
     ARENA -.-> CB2
     QA -.-> CA3
     QB -.-> CB3
+    TLM -.-> X1
 ```
+
+The exporter is an ordinary client too: it also maps control, arena and its own
+queue pair, left out of the diagram.
 
 | Region | Backing | Host | Each client | Holds |
 |---|---|---|---|---|
-| Control | one `memfd` | read/write | read-only | magic, `spec_version`, `layout_version`, flags, `slot_size`, `inline_budget`, `arena_size`, `host_epoch`, `host_heartbeat`, and the lease view |
-| Queue pair | one `memfd` per admitted slot | read/write | read/write, its own slot only | inbound and outbound SPSC rings, credit counters, the client heartbeat, the sticky `control_lost` flag |
+| Control | one `memfd` | read/write | read-only | magic, `spec_version`, `layout_version`, flags, `slot_size`, `inline_budget`, `arena_size`, `host_epoch`, `host_heartbeat`, `host_waiting`, and the lease view |
+| Queue pair | one `memfd` per admitted slot | read/write | read/write, its own slot only | inbound and outbound SPSC rings, credit counters, the client heartbeat, the sticky `control_lost` flag, `client_waiting` |
 | Arena | one `memfd` | read/write | read/write | payloads too large to travel inline |
+| Telemetry | one `memfd`, only once enabled | read/write | read/write, the one granted consumer only | pacing values, `dropped`, `consumer_waiting`, the record ring ([telemetry](telemetry.md)) |
 | Queue directory | not a region | private | none | which slot is whom, principals, grants, pending requests |
 
-Because a client receives exactly three descriptors at attach (control, arena,
-its own queue pair) it cannot map another client's rings, cannot enumerate other
-slots, and cannot write the geometry its peers read. Those properties are
-enforced. Arena bounds are not: every client maps the arena read-write for
+The doorbells are `eventfd`s, not regions: one the host reads and every client
+writes, and one per client that only the host writes.
+
+A client receives only the descriptors for what it may map: control, arena and
+its own queue pair, then the two doorbells if it was granted them, then the
+telemetry region and its doorbell if it is the granted consumer. So it cannot
+map another client's rings, cannot enumerate other slots, and cannot write the
+geometry its peers read. Those properties are enforced. Arena bounds are not: every client maps the arena read-write for
 zero-copy fan-out, so staying inside one's leases is a contract the client
 libraries keep and conformance checks, not something hardware enforces
 ([D2](../spec/decisions.md#d2-threat-model)).
@@ -232,3 +245,5 @@ and Rust code creates no regions and accepts no attaches.
   three implementations and how a new one is proven.
 - [Versions and releases](versions-and-releases.md): what each version number
   means and how a consumer pins the ring.
+- [Performance](performance.md): measuring dispatch overhead, and the budget.
+- [Configuration](configuration.md): every setting the implementations read.

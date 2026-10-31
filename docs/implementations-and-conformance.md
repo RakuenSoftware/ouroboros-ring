@@ -74,10 +74,19 @@ flowchart TB
    module, and checks it reaches the same outcomes as the C caller.
 
 CI runs all of it on every change: the vector check and the single-host check,
-the C suite under release, ASan/UBSan and (for the arena) TSan builds, the Go
-suite with `CGO_ENABLED=0` and under the race detector, the Rust suite with
-`clippy -D warnings`, each client against the conformance host, and the module
-harness against the Go and Rust module processes and the Rust caller.
+the C suite under four builds, the Go suite with `CGO_ENABLED=0` and under the
+race detector, the Rust suite with `clippy -D warnings`, each client against
+the conformance host, and the module harness against the Go and Rust module
+processes and the Rust caller. The four C builds are:
+
+- **`-O2`**, which also runs the [performance budget](performance.md) and builds
+  the external module example against the installed package;
+- **`CMAKE_BUILD_TYPE=Release`**, which defines `NDEBUG`. The tests and
+  harnesses undefine it again, because they assert with `assert`: before that,
+  a Release build compiled every check out and the suite passed while testing
+  nothing;
+- **ASan/UBSan**;
+- **TSan**, for the arena.
 
 ## Adding an implementation
 
@@ -110,8 +119,17 @@ are easy to get wrong, roughly in order:
   ([D12](../spec/decisions.md#d12-cross-process-arena-reads-a-lease-view-and-a-release-message)).
 - **Returning arena references.** Send `LEASE_RELEASE` once per arena frame
   received, queueing (bounded) when the outbound ring is full.
-- **Heartbeats.** Advance the queue-pair heartbeat while attached, or the host
-  will reap the slot.
+- **Heartbeats.** Advance the queue-pair heartbeat while attached, unless the
+  reply granted `OURO_ATTACH_CAP_PROCESS_LIVENESS`, or the host will reap the
+  slot. On detach, store `OURO_HEARTBEAT_DETACHED` and ring the host doorbell.
+- **The doorbell fences.** A sleeper stores its waiting flag, fences, then
+  re-checks its ring before it sleeps; a signaller commits, fences, then loads
+  the flag. Drop either fence and a wakeup is lost under load, which no
+  single-threaded test will show
+  ([wire spec: doorbells](../spec/wire-and-segment.md#doorbells)).
+- **Telemetry pacing.** A telemetry consumer follows the region's
+  `drain_interval_ns` and `idle_after_ns`. One that sleeps on the doorbell after
+  every drain still works, but costs a busy host a system call per pump.
 
 ## Building and testing
 

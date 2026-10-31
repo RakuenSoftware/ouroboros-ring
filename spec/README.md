@@ -14,8 +14,8 @@ here requires linking, importing or generating from a reference implementation.
 
 | Document | What it fixes |
 |---|---|
-| [`wire-and-segment.md`](wire-and-segment.md) | Regions, rings, the 64-byte frame, attach and admission, routing, flow control, ordering, versioning, payloads, capture |
-| [`decisions.md`](decisions.md) | Why the layout is what it is (D1 to D12), including the threat model |
+| [`wire-and-segment.md`](wire-and-segment.md) | Regions, rings, the 64-byte frame, attach and admission, routing, flow control, doorbells, liveness, telemetry, ordering, versioning, payloads, capture |
+| [`decisions.md`](decisions.md) | Why the layout is what it is (D1 to D16), including the threat model |
 | [`../vectors/`](../vectors/) | The frozen numbers: `wire_vectors.tsv` (frame bytes) and `layout_vectors.tsv` (every offset, size, magic and version a client needs) |
 
 Where prose and vectors disagree, the vectors are authoritative and the prose is
@@ -27,9 +27,11 @@ of the contract.
 - the wire frame and version negotiation;
 - the control, private queue-pair and arena layouts;
 - single-producer/single-consumer rings and bounded credits;
-- client admission (through the host's admission hook) and reaping;
+- client admission (through the host's admission hook), liveness and reaping;
+- doorbells: sleeping when idle and waking only a sleeper;
 - publish, subscribe, request/reply, cancellation and typed absence;
 - the host sequence, observer routing and the full-stream tap hook;
+- the telemetry record and its hand-off to one consumer process;
 - the capture format and observational replay;
 - local `SOCK_SEQPACKET` attachment and descriptor grant;
 - the AMOD module message envelope (`module_protocol`), fragmentation of large
