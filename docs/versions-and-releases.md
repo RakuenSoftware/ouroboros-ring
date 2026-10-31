@@ -7,7 +7,10 @@ reasons and are checked in different places.
 ## Release versions
 
 `VERSION` holds the repository's release in semver. Within 0.x a minor bump may
-break consumers; from 1.0 only a major bump may.
+break consumers; from 1.0 only a major bump may. Within 0.x a change to the C
+ABI, such as a field added to a public struct, takes a minor bump even when no
+contract version moves: 0.4.0 is one, because `ouro_telemetry_reader_t` grew.
+What each release changed is in the [changelog](../CHANGELOG.md).
 
 ```mermaid
 flowchart LR
@@ -62,7 +65,10 @@ Some changes need none of these:
   (D15) is one more bit in that word and one reserved `client_heartbeat` value,
   `OURO_HEARTBEAT_DETACHED`, which no clock reading takes. Telemetry (D16) is
   a third bit, `OURO_ATTACH_CAP_TELEMETRY`, and a region of its own that only a
-  client granted it receives, so no existing layout changes.
+  client granted it receives, so no existing layout changes. Its pacing values
+  (0.4.0) took two words of that region's reserved space, which a 0.3.0 host
+  leaves zero, and zero means a consumer that sleeps on the doorbell after
+  every drain: the 0.3.0 behaviour.
 
 A host and client agree the wire version at attach
 ([attach and admission](attach-and-admission.md)). Capture files carry their

@@ -17,7 +17,8 @@ and pins a release of it like any other.
 - **The documentation** in [`docs/`](docs/README.md) explains how it works:
   the [architecture](docs/architecture.md), attach and admission, routing and
   flow control, module calls, arena payloads, capture, telemetry, conformance,
-  and versions.
+  versions, performance and configuration. What each release changed is in the
+  [changelog](CHANGELOG.md).
 
 ## Implementations
 
