@@ -817,7 +817,8 @@ already do by exiting. A client that stops heartbeating without the grant is rea
 ## D16: Tap telemetry leaves the host the moment an event is stamped
 
 *Added 2026-10-30, after v0. One attach capability bit, one new region, two more descriptors in a
-telemetry grant; `layout_version` stays 1.*
+telemetry grant; `layout_version` stays 1. Amended 2026-10-31: consumer pacing, two region fields
+taken from reserved space.*
 
 **Decision: when the host stamps an event's `seq`, it writes one fixed-size, content-free telemetry
 record into a single-producer, single-consumer ring in its own region, before the tap callback runs
@@ -864,6 +865,8 @@ stamp and the telemetry process's next read.
   | 12 | `flags` u32 = 0 | host |
   | 16 | `host_epoch` u64 | host |
   | 24 | `dropped` u64 | host: every record ever lost |
+  | 32 | `drain_interval_ns` u64 | host: a busy consumer's drain period; 0 for none |
+  | 40 | `idle_after_ns` u64 | host: how long without records before a consumer sleeps |
   | 64 | `consumer_waiting` u32 | consumer only ([D13](#d13-doorbells-idle-ends-sleep-in-the-kernel)) |
   | 128 | an `ouro_ring` of 128-byte slots | head: host; tail: consumer |
 
@@ -873,10 +876,27 @@ stamp and the telemetry process's next read.
   rings the telemetry doorbell under the D13 protocol (sequentially consistent fence, then a load of
   `consumer_waiting`), but only once per `ouro_host_pump` and only if the consumer is asleep. The
   host keeps its own copy of `head` and of the last `tail` it read, and reads `tail` across cores
-  only when that copy says the ring is full. Measured with `c/bench/dispatch.c`, the whole hand-off
-  adds about 13 ns to an event's 87 ns dispatch. An
-  event stamped outside a pump, such as the `producer_reaped` a reap emits, rings it at once. A busy
-  host whose exporter keeps up makes no system calls for telemetry at all.
+  only when that copy says the ring is full. An event stamped outside a pump, such as the
+  `producer_reaped` a reap emits, rings it at once.
+- **Consumer pacing.** A consumer woken for every pump would cost the host a system call per pump,
+  and would read each record line right behind the host writing it, so the line moves between cores
+  for every record. So the host publishes `drain_interval_ns` and `idle_after_ns`, and every
+  consumer follows them. A consumer that found records within `idle_after_ns` does not sleep on the
+  doorbell: it keeps `consumer_waiting` down, sleeps `drain_interval_ns`, and looks again. Only after
+  `idle_after_ns` without records does it raise `consumer_waiting` and sleep on the doorbell. A
+  busy host therefore makes no system calls for telemetry and is never read behind; the doorbell is
+  rung only for a consumer that is actually asleep, so an idle ring still costs nothing. The
+  defaults are 10 µs and 1 ms. The host operator overrides them with
+  `OURO_TELEMETRY_DRAIN_INTERVAL_US` and `OURO_TELEMETRY_IDLE_AFTER_US`, read when telemetry is
+  enabled, and an embedding with `ouro_host_telemetry_pacing`. `drain_interval_ns` of 0 restores a
+  consumer that sleeps on the doorbell after every drain. A record is exported at most one drain
+  interval after it is stamped while the host is busy, and at once when it wakes an idle consumer.
+
+  Measured with `c/bench/dispatch.c` on a Threadripper 3970X, host and consumer threads pinned to
+  their own cores (`OURO_BENCH_HOST_CPU`, `OURO_BENCH_DRAIN_CPU`): 127 ns per event with telemetry
+  off; 132–133 ns with it on and paced, the host ringing the doorbell 0–2 times in a 2-million-event
+  run; and, with pacing off, 144 ns with both threads on one CCX and 157 ns across CCXs, the host
+  ringing about 30,000 times. Results compare only on one machine with the same pinning.
 - **Never blocks.** If the ring is full when an event is stamped, the host counts the record as
   lost (`dropped` and a pending gap count) and goes on. The next record that fits is preceded by a gap
   record carrying the count, so the exported stream says how much is missing and where, just as

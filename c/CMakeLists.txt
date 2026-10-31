@@ -21,6 +21,10 @@ if(NOT UNIX OR APPLE)
 endif()
 
 set(OURO_WARNINGS -Wall -Wextra -Werror -Wformat=2 -Wno-unused-parameter)
+# Tests and conformance harnesses check with assert(), so they keep it in every
+# build type. A Release configuration defines NDEBUG, which would compile every
+# check out: the suite would still build, run and pass while testing nothing.
+set(OURO_TEST_FLAGS -UNDEBUG)
 # GCC 15.2's IPA bit-CP pass can prove a live int parameter constant zero
 # (observed in a consumer built -Os -flto: a count > 0 arrived as 0). The ring's
 # own build turns the pass off for GCC so no consumer has to know to; clang has
@@ -105,7 +109,7 @@ if(BUILD_TESTING)
                  telemetry)
         add_executable(test_${name} tests/test_${name}.c ${OURO_TEST_${name}})
         target_compile_features(test_${name} PRIVATE c_std_11)
-        target_compile_options(test_${name} PRIVATE ${OURO_WARNINGS})
+        target_compile_options(test_${name} PRIVATE ${OURO_WARNINGS} ${OURO_TEST_FLAGS})
         target_include_directories(test_${name} PRIVATE include src tests)
         target_compile_definitions(test_${name} PRIVATE
             OURO_VECTOR_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../vectors")
@@ -118,7 +122,7 @@ if(BUILD_TESTING)
     # Go and Rust suites drive it (OURO_CONFORMANCE_HOST).
     add_executable(ouroboros-ring-conformance-host conformance/host.c ${OURO_ALL_SOURCES})
     target_compile_features(ouroboros-ring-conformance-host PRIVATE c_std_11)
-    target_compile_options(ouroboros-ring-conformance-host PRIVATE ${OURO_WARNINGS})
+    target_compile_options(ouroboros-ring-conformance-host PRIVATE ${OURO_WARNINGS} ${OURO_TEST_FLAGS})
     target_include_directories(ouroboros-ring-conformance-host PRIVATE include src)
     target_link_libraries(ouroboros-ring-conformance-host PRIVATE Threads::Threads)
 
@@ -129,7 +133,8 @@ if(BUILD_TESTING)
     add_executable(ouroboros-ring-module-runtime-harness conformance/module_runtime.c
                    ${OURO_ALL_SOURCES})
     target_compile_features(ouroboros-ring-module-runtime-harness PRIVATE c_std_11)
-    target_compile_options(ouroboros-ring-module-runtime-harness PRIVATE ${OURO_WARNINGS})
+    target_compile_options(ouroboros-ring-module-runtime-harness PRIVATE ${OURO_WARNINGS}
+                           ${OURO_TEST_FLAGS})
     target_include_directories(ouroboros-ring-module-runtime-harness PRIVATE include src tests)
     target_link_libraries(ouroboros-ring-module-runtime-harness PRIVATE Threads::Threads)
     add_test(NAME module_runtime COMMAND ouroboros-ring-module-runtime-harness)
@@ -148,7 +153,8 @@ if(BUILD_TESTING)
     option(OURO_TSAN "Build and run the arena ThreadSanitizer test" OFF)
     if(OURO_TSAN)
         add_executable(test_arena_tsan tests/test_arena_tsan.c ${OURO_ALL_SOURCES})
-        target_compile_options(test_arena_tsan PRIVATE ${OURO_WARNINGS} -fsanitize=thread -O1 -g)
+        target_compile_options(test_arena_tsan PRIVATE ${OURO_WARNINGS} ${OURO_TEST_FLAGS}
+                               -fsanitize=thread -O1 -g)
         target_link_options(test_arena_tsan PRIVATE -fsanitize=thread)
         target_include_directories(test_arena_tsan PRIVATE include src tests)
         target_link_libraries(test_arena_tsan PRIVATE Threads::Threads)

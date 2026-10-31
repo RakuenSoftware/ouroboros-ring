@@ -40,6 +40,12 @@
 /* Ring capacity a host uses when the embedding passes 0: 8 MiB of records. */
 #define OURO_TELEMETRY_CAPACITY_DEFAULT 65536u
 
+/* Consumer pacing a host publishes when nothing else is configured (D16). A
+ * consumer that found records within idle_after drains every drain_interval
+ * without asking the host to ring; idle longer, it sleeps on the doorbell. */
+#define OURO_TELEMETRY_DRAIN_INTERVAL_NS_DEFAULT 10000ull
+#define OURO_TELEMETRY_IDLE_AFTER_NS_DEFAULT     1000000ull
+
 /* Region offsets. The ring starts on its own cache line after the header, and
  * consumer_waiting sits alone on the line between, so neither end's writes
  * invalidate the line the other end writes. */
@@ -53,12 +59,18 @@ typedef struct
    _Atomic uint32_t record_size;
    _Atomic uint32_t flags;
    _Atomic uint64_t host_epoch;
-   _Atomic uint64_t dropped; /* host-written: every record ever lost */
-   _Atomic uint64_t reserved[4];
+   _Atomic uint64_t dropped;           /* host-written: every record ever lost */
+   _Atomic uint64_t drain_interval_ns; /* host-written: a busy consumer's drain period; 0: none */
+   _Atomic uint64_t idle_after_ns;     /* host-written: idle this long, a consumer sleeps */
+   _Atomic uint64_t reserved[2];
    _Alignas(64) _Atomic uint32_t consumer_waiting; /* consumer-written (D13) */
 } ouro_telemetry_region_t;
 
 _Static_assert(offsetof(ouro_telemetry_region_t, dropped) == 24, "dropped offset is in D16");
+_Static_assert(offsetof(ouro_telemetry_region_t, drain_interval_ns) == 32,
+               "drain_interval_ns offset is in D16");
+_Static_assert(offsetof(ouro_telemetry_region_t, idle_after_ns) == 40,
+               "idle_after_ns offset is in D16");
 _Static_assert(offsetof(ouro_telemetry_region_t, consumer_waiting) ==
                    OURO_TELEMETRY_REGION_OFF_WAITING,
                "consumer_waiting offset is in D16");
@@ -97,6 +109,7 @@ typedef struct
    ouro_telemetry_region_t *hdr;
    ouro_ring_t ring;
    int doorbell_fd;
+   uint64_t active_ns; /* CLOCK_MONOTONIC when a wait last found records; 0: never */
 } ouro_telemetry_reader_t;
 
 /* Attach as a client that also asks for the telemetry grant (D16). On success
@@ -124,7 +137,13 @@ uint64_t ouro_telemetry_dropped(const ouro_telemetry_reader_t *r);
 
 /* Sleep until a record is available, `extra_fd` (may be -1, e.g. the client's
  * host pidfd) is readable, or timeout_ms passes (negative: no timeout). Returns
- * 1 when records are available, 0 on timeout or extra_fd, -1 on error. */
+ * 1 when records are available, 0 on timeout or extra_fd, -1 on error.
+ *
+ * Paced by the host's published drain_interval_ns and idle_after_ns (D16): a
+ * consumer that found records within idle_after sleeps drain_interval and looks
+ * again, without asking the host to ring, so a busy host makes no system call
+ * and the consumer never reads right behind it. Idle longer, it sleeps on the
+ * doorbell (D13) and the host rings once the next record lands. */
 int ouro_telemetry_wait(ouro_telemetry_reader_t *r, int extra_fd, int timeout_ms);
 
 #endif /* OUROBOROS_TELEMETRY_H */

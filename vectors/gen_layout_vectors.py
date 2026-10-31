@@ -152,6 +152,8 @@ row("telemetry.off.record_size", 8)
 row("telemetry.off.flags", 12)
 row("telemetry.off.host_epoch", 16)
 row("telemetry.off.dropped", 24, "host-written: every record ever lost")
+row("telemetry.off.drain_interval_ns", 32, "host-written: a busy consumer drains this often")
+row("telemetry.off.idle_after_ns", 40, "host-written: idle this long, a consumer sleeps")
 row("telemetry.off.consumer_waiting", 64, "consumer-written, its own cache line")
 row("telemetry.off.ring", 128, "a ring of telemetry_record.size slots")
 struct("telemetry_record", 128, [

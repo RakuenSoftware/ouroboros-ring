@@ -4,7 +4,8 @@ Every event the host stamps is described off the host the moment it is
 stamped ([D16](../spec/decisions.md#d16-tap-telemetry-leaves-the-host-the-moment-an-event-is-stamped)).
 The host writes one record per event into a ring that only one process reads,
 and that process sends the records to a collector. The host never waits for it,
-never talks to a network, and pays about 13 ns per event for the hand-off.
+never talks to a network, and, with the consumer paced, pays about 5 ns per
+event for the hand-off (measured on one machine; see [Pacing](#pacing)).
 
 ```mermaid
 flowchart LR
@@ -69,6 +70,44 @@ sequenceDiagram
   in one request; what arrives while that request is in flight goes in the
   next. It releases records only once the collector accepts them, so delivery
   is at least once and `seq` identifies a duplicate.
+
+## Pacing
+
+A consumer woken for every pump costs the host a system call per pump, and it
+reads each record right behind the host writing it, so every record's cache
+lines move between cores. The host therefore publishes two values in the
+region header, and every reader's wait follows them:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `drain_interval_ns` | 10 µs | while busy, the consumer looks again this often |
+| `idle_after_ns` | 1 ms | with no records this long, it sleeps on the doorbell |
+
+A consumer that found records recently keeps `consumer_waiting` down and drains
+on the interval, so a busy host never rings it and is never read right behind.
+Once idle, it sleeps on the doorbell as before, so an idle ring costs nothing
+and the host rings only a consumer that is actually asleep. A record leaves at
+most one drain interval after it is stamped while the host is busy.
+
+The host operator sets them with `OURO_TELEMETRY_DRAIN_INTERVAL_US` and
+`OURO_TELEMETRY_IDLE_AFTER_US` (read when telemetry is enabled); an embedding
+can call `ouro_host_telemetry_pacing`. A drain interval of 0 has every wait
+sleep on the doorbell.
+
+Measured with `c/bench/dispatch.c` on a Threadripper 3970X, both threads pinned
+to their own cores, 2 million events per run:
+
+| | ns per event | doorbell writes |
+|---|---|---|
+| telemetry off | 127 | – |
+| on, paced (default) | 132–133 | 0–2 |
+| on, pacing off, one CCX | 144 | ~30,000 |
+| on, pacing off, across CCXs | 157 | ~30,000 |
+
+These compare only on one machine with the same pinning
+(`OURO_BENCH_HOST_CPU`, `OURO_BENCH_DRAIN_CPU`). `scripts/check_perf_budget.sh`
+also holds the doorbell-write count for a busy consumer under a ceiling, a
+check that means the same on every machine.
 
 ## When the exporter falls behind
 

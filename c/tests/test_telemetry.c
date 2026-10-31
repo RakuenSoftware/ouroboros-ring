@@ -11,6 +11,9 @@
  *   - A consumer asleep on the doorbell wakes for a pump; one that is awake is
  *     not signalled.
  *   - A later consumer resumes where the last one stopped.
+ *   - Pacing: the region carries the host's drain interval and idle threshold;
+ *     a consumer kept busy costs the host one wake, for its first record, and
+ *     an idle one costs a wake per record.
  *   - Nothing leaks a descriptor.
  */
 #define _GNU_SOURCE
@@ -375,6 +378,109 @@ static void test_doorbell_and_resume(void)
    printf("  doorbell: asleep wakes once per pump, awake is not signalled; resume at tail\n");
 }
 
+struct drainer
+{
+   ouro_telemetry_reader_t *r;
+   int want;
+   atomic_int got;
+};
+
+static void *drain_records(void *p)
+{
+   struct drainer *d = p;
+   while (atomic_load(&d->got) < d->want)
+   {
+      if (ouro_telemetry_wait(d->r, -1, 5000) != 1)
+         break;
+      uint64_t n = ouro_telemetry_available(d->r);
+      ouro_telemetry_release(d->r, n);
+      atomic_fetch_add(&d->got, (int)n);
+   }
+   return NULL;
+}
+
+static void publish_one(ouro_host_t *h, ouro_client_t *prod, ouro_client_t *obs)
+{
+   must(ouro_client_publish(prod, KIND, "p", 1) == OURO_CLIENT_OK, "publish");
+   (void)ouro_host_pump(h);
+   ouro_event_t ev;
+   while (ouro_client_poll(obs, &ev) == OURO_CLIENT_OK)
+      ;
+}
+
+static void test_pacing(void)
+{
+   ouro_host_config_t cfg;
+   host_config(&cfg);
+   ouro_host_t h;
+   must(ouro_host_create(&h, &cfg, NULL, NULL) == OURO_HOST_OK, "host");
+   ouro_host_set_attach_hook(&h, grant_exporter, NULL);
+   setenv("OURO_TELEMETRY_DRAIN_INTERVAL_US", "2000", 1);
+   setenv("OURO_TELEMETRY_IDLE_AFTER_US", "not-a-number", 1);
+   must(ouro_host_telemetry_enable(&h, 64) == OURO_HOST_OK, "enable");
+   unsetenv("OURO_TELEMETRY_DRAIN_INTERVAL_US");
+   unsetenv("OURO_TELEMETRY_IDLE_AFTER_US");
+   must(atomic_load(&h.telemetry->drain_interval_ns) == 2000000u,
+        "the environment sets the drain interval");
+   must(atomic_load(&h.telemetry->idle_after_ns) == OURO_TELEMETRY_IDLE_AFTER_NS_DEFAULT,
+        "an unreadable value leaves the default");
+   must(ouro_host_telemetry_pacing(&h, 2000000u, 500000000u) == OURO_HOST_OK, "pacing");
+   must(atomic_load(&h.telemetry->idle_after_ns) == 500000000u, "the embedding sets it too");
+
+   ouro_client_t cons;
+   ouro_telemetry_reader_t r;
+   int granted = 0;
+   attach_consumer(&h, 7, &cons, &r, &granted);
+   must(granted, "granted");
+   ouro_client_t prod, obs;
+   must(ouro_host_attach_local(&h, &prod, 1) == OURO_CLIENT_OK, "producer");
+   must(ouro_host_attach_local(&h, &obs, 1) == OURO_CLIENT_OK, "observer");
+   must(ouro_host_subscribe(&h, obs.reply.handle_id, KIND) == OURO_HOST_OK, "subscribe");
+
+   /* Busy: records every 3 ms against a 2 ms drain interval and a 500 ms idle
+    * threshold. Only the first record finds the consumer asleep. */
+   struct drainer d = {.r = &r, .want = 20};
+   pthread_t t;
+   uint64_t before = h.telemetry_wakes;
+   must(pthread_create(&t, NULL, drain_records, &d) == 0, "drainer");
+   while (!atomic_load(&r.hdr->consumer_waiting))
+      sched_yield();
+   for (int i = 0; i < d.want; i++)
+   {
+      publish_one(&h, &prod, &obs);
+      usleep(3000);
+   }
+   pthread_join(t, NULL);
+   must(atomic_load(&d.got) == d.want, "every record drained");
+   must(h.telemetry_wakes - before == 1, "a busy consumer costs the host one wake, its first");
+
+   /* Idle: a 2 ms threshold, and each record lands after the consumer is
+    * asleep again. Every one costs a wake. */
+   must(ouro_host_telemetry_pacing(&h, 1000000u, 2000000u) == OURO_HOST_OK, "pacing");
+   d.want = 5;
+   atomic_store(&d.got, 0);
+   before = h.telemetry_wakes;
+   must(pthread_create(&t, NULL, drain_records, &d) == 0, "drainer");
+   for (int i = 0; i < d.want; i++)
+   {
+      while (!atomic_load(&r.hdr->consumer_waiting))
+         sched_yield();
+      publish_one(&h, &prod, &obs);
+      while (atomic_load(&d.got) < i + 1)
+         sched_yield();
+   }
+   pthread_join(t, NULL);
+   must(atomic_load(&d.got) == d.want, "every record drained");
+   must(h.telemetry_wakes - before == (uint64_t)d.want, "an idle consumer is woken for each");
+
+   ouro_client_detach(&prod);
+   ouro_client_detach(&obs);
+   ouro_telemetry_reader_close(&r);
+   ouro_client_detach(&cons);
+   ouro_host_destroy(&h);
+   printf("  pacing: a busy consumer costs one wake; an idle one a wake per record\n");
+}
+
 int main(void)
 {
    int fds = open_fds();
@@ -383,6 +489,7 @@ int main(void)
    test_stream();
    test_full_ring_gap();
    test_doorbell_and_resume();
+   test_pacing();
    must(open_fds() == fds, "no descriptor leaked");
    puts("telemetry: ok");
    return 0;

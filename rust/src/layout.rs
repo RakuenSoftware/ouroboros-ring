@@ -185,6 +185,8 @@ pub(crate) mod telemetry {
     pub(crate) const OFF_FLAGS: usize = 12;
     pub(crate) const OFF_HOST_EPOCH: usize = 16;
     pub(crate) const OFF_DROPPED: usize = 24;
+    pub(crate) const OFF_DRAIN_INTERVAL_NS: usize = 32;
+    pub(crate) const OFF_IDLE_AFTER_NS: usize = 40;
     pub(crate) const OFF_CONSUMER_WAITING: usize = 64;
     pub(crate) const OFF_RING: usize = 128;
     pub(crate) const RECORD_LEN: usize = 128;
@@ -415,6 +417,14 @@ mod tests {
             ("telemetry.off.flags", telemetry::OFF_FLAGS as u64),
             ("telemetry.off.host_epoch", telemetry::OFF_HOST_EPOCH as u64),
             ("telemetry.off.dropped", telemetry::OFF_DROPPED as u64),
+            (
+                "telemetry.off.drain_interval_ns",
+                telemetry::OFF_DRAIN_INTERVAL_NS as u64,
+            ),
+            (
+                "telemetry.off.idle_after_ns",
+                telemetry::OFF_IDLE_AFTER_NS as u64,
+            ),
             (
                 "telemetry.off.consumer_waiting",
                 telemetry::OFF_CONSUMER_WAITING as u64,

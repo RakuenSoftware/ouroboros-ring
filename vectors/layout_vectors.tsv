@@ -120,6 +120,8 @@ telemetry.off.record_size	8
 telemetry.off.flags	12
 telemetry.off.host_epoch	16
 telemetry.off.dropped	24
+telemetry.off.drain_interval_ns	32
+telemetry.off.idle_after_ns	40
 telemetry.off.consumer_waiting	64
 telemetry.off.ring	128
 telemetry_record.off.type	0

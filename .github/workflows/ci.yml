@@ -30,6 +30,13 @@ jobs:
             ldflags: ""
             cmake: ""
             ctest: ""
+          # A Release configuration defines NDEBUG. Built and run here so the
+          # suite cannot quietly stop building there or start testing nothing.
+          - name: release-ndebug
+            flags: ""
+            ldflags: ""
+            cmake: "-DCMAKE_BUILD_TYPE=Release"
+            ctest: ""
           - name: asan-ubsan
             flags: "-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined"
             ldflags: "-fsanitize=address,undefined"
