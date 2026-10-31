@@ -141,6 +141,8 @@ func goLayout() map[string]uint64 {
 		"telemetry.off.flags":                telemetryRegionOffFlags,
 		"telemetry.off.host_epoch":           telemetryRegionOffHostEpoch,
 		"telemetry.off.dropped":              telemetryRegionOffDropped,
+		"telemetry.off.drain_interval_ns":    telemetryRegionOffDrainNS,
+		"telemetry.off.idle_after_ns":        telemetryRegionOffIdleNS,
 		"telemetry.off.consumer_waiting":     telemetryRegionOffWaiting,
 		"telemetry.off.ring":                 telemetryRegionOffRing,
 		"telemetry_record.off.type":          telemetryOffType,

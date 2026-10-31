@@ -225,6 +225,7 @@ typedef struct ouro_host
    uint64_t telemetry_now;        /* this pump's realtime, read at its first stamp */
    uint64_t telemetry_lost;       /* records lost since the last gap record */
    int telemetry_unsignalled; /* written since the consumer was last signalled */
+   uint64_t telemetry_wakes;  /* doorbell writes: a consumer was asleep (D16 pacing) */
    int in_pump;               /* signal once at the end of the pump, not per event */
 } ouro_host_t;
 
@@ -321,6 +322,14 @@ void ouro_host_set_tap(ouro_host_t *h, ouro_tap_fn fn, void *ctx);
  * then on every seq-stamped event writes one record before the tap is called.
  * Call before any client may ask for the grant. */
 ouro_host_result_t ouro_host_telemetry_enable(ouro_host_t *h, uint32_t capacity);
+
+/* D16: set the consumer pacing the region publishes: a consumer that found
+ * records within idle_after_ns drains every drain_interval_ns without the host
+ * ringing; 0 for drain_interval_ns has every wait sleep on the doorbell. Enable
+ * publishes the defaults, or OURO_TELEMETRY_DRAIN_INTERVAL_US and
+ * OURO_TELEMETRY_IDLE_AFTER_US from the environment. Requires enable first. */
+ouro_host_result_t ouro_host_telemetry_pacing(ouro_host_t *h, uint64_t drain_interval_ns,
+                                              uint64_t idle_after_ns);
 
 /* D16: grant `slot` the telemetry consumer end. The embedding calls it from its
  * attach hook, for the one principal it trusts with metadata about every event;

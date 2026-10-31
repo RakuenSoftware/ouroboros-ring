@@ -8,10 +8,14 @@
       "observed_note": "measured when the benchmark lived in aimee (reference dev box). The ceiling carries ~7x headroom so CI variance does not flake the check while a per-event syscall still trips it."
     },
     "dispatch_overhead_telemetry_ns": {
-      "description": "The same dispatch with D16 telemetry on: the host writes one record per event and a consumer thread drains them as an exporter would (OURO_BENCH_TELEMETRY=1).",
+      "description": "The same dispatch with D16 telemetry on: the host writes one record per event and a consumer thread drains them through the reader's paced wait, as an exporter would (OURO_BENCH_TELEMETRY=1).",
       "ceiling_ns": 1000,
-      "observed_ns": 100,
-      "observed_note": "measured 2026-10-30 on the reference dev box: 87 ns off, 100 ns on. Same headroom rule as dispatch_overhead_ns."
+      "observed_ns": 132,
+      "observed_note": "measured 2026-10-31 on a Threadripper 3970X with both threads pinned to their own cores: 127 ns off, 132-133 ns on and paced (144-157 ns with pacing off). Same headroom rule as dispatch_overhead_ns."
+    },
+    "telemetry_wakes": {
+      "description": "Doorbell writes during the telemetry-on run (telemetry_wakes=). A paced consumer kept busy is never asleep when a record lands, so the host rings it only for the first record; consumer pacing that stops working rings once per pump, about 8,000 times in this run. A count, not a time, so it means the same on every machine. The ceiling leaves room for a consumer descheduled past the idle threshold on a busy CI runner, which legitimately costs a wake, while staying 20x below what broken pacing produces.",
+      "ceiling": 400
     }
   }
 }

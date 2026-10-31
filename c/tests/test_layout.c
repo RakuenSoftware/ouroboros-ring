@@ -250,6 +250,8 @@ int main(void)
        E("telemetry.off.flags", offsetof(ouro_telemetry_region_t, flags)),
        E("telemetry.off.host_epoch", offsetof(ouro_telemetry_region_t, host_epoch)),
        E("telemetry.off.dropped", offsetof(ouro_telemetry_region_t, dropped)),
+       E("telemetry.off.drain_interval_ns", offsetof(ouro_telemetry_region_t, drain_interval_ns)),
+       E("telemetry.off.idle_after_ns", offsetof(ouro_telemetry_region_t, idle_after_ns)),
        E("telemetry.off.consumer_waiting", offsetof(ouro_telemetry_region_t, consumer_waiting)),
        E("telemetry.off.ring", OURO_TELEMETRY_REGION_OFF_RING),
        E("telemetry_record.off.type", OURO_TELEMETRY_OFF_TYPE),

@@ -3,12 +3,40 @@
 
 #include <errno.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <ouroboros/region_host.h>
+
+/* A pacing override from the environment, in microseconds: the host
+ * operator's knob, read once at enable. Anything but a plain decimal leaves
+ * the value as it was. */
+static void pacing_from_env(const char *name, uint64_t *ns)
+{
+   const char *v = getenv(name);
+   if (!v || !*v)
+      return;
+   char *end = NULL;
+   errno = 0;
+   unsigned long long us = strtoull(v, &end, 10);
+   if (errno || !end || *end || us > UINT64_MAX / 1000ull)
+      return;
+   *ns = (uint64_t)us * 1000ull;
+}
+
+ouro_host_result_t ouro_host_telemetry_pacing(ouro_host_t *h, uint64_t drain_interval_ns,
+                                              uint64_t idle_after_ns)
+{
+   if (!h || !h->telemetry)
+      return OURO_HOST_ERR_ARG;
+   atomic_store_explicit(&h->telemetry->drain_interval_ns, drain_interval_ns,
+                         memory_order_relaxed);
+   atomic_store_explicit(&h->telemetry->idle_after_ns, idle_after_ns, memory_order_relaxed);
+   return OURO_HOST_OK;
+}
 
 ouro_host_result_t ouro_host_telemetry_enable(ouro_host_t *h, uint32_t capacity)
 {
@@ -43,8 +71,15 @@ ouro_host_result_t ouro_host_telemetry_enable(ouro_host_t *h, uint32_t capacity)
    atomic_store_explicit(&t->version, OURO_TELEMETRY_VERSION, memory_order_relaxed);
    atomic_store_explicit(&t->record_size, OURO_TELEMETRY_RECORD_LEN, memory_order_relaxed);
    atomic_store_explicit(&t->host_epoch, ouro_control_epoch(h->control), memory_order_relaxed);
+   uint64_t drain = OURO_TELEMETRY_DRAIN_INTERVAL_NS_DEFAULT;
+   uint64_t idle = OURO_TELEMETRY_IDLE_AFTER_NS_DEFAULT;
+   pacing_from_env("OURO_TELEMETRY_DRAIN_INTERVAL_US", &drain);
+   pacing_from_env("OURO_TELEMETRY_IDLE_AFTER_US", &idle);
+   atomic_store_explicit(&t->drain_interval_ns, drain, memory_order_relaxed);
+   atomic_store_explicit(&t->idle_after_ns, idle, memory_order_relaxed);
    atomic_store_explicit(&t->magic, OURO_TELEMETRY_MAGIC, memory_order_release);
    h->telemetry_head = h->telemetry_tail_cache = h->telemetry_lost = 0;
+   h->telemetry_wakes = 0;
    h->telemetry = t;
    return OURO_HOST_OK;
 fail:
@@ -189,6 +224,7 @@ void ouro_telemetry_host_signal(ouro_host_t *h)
    if (atomic_load_explicit(&h->telemetry->consumer_waiting, memory_order_relaxed) != 0)
    {
       uint64_t one = 1;
+      h->telemetry_wakes++;
       while (write(h->telemetry_doorbell_fd, &one, sizeof one) < 0 && errno == EINTR)
          ;
    }

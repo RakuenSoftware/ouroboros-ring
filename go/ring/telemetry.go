@@ -34,6 +34,8 @@ const (
 	telemetryRegionOffFlags      = 12
 	telemetryRegionOffHostEpoch  = 16
 	telemetryRegionOffDropped    = 24
+	telemetryRegionOffDrainNS    = 32
+	telemetryRegionOffIdleNS     = 40
 	telemetryRegionOffWaiting    = 64
 	telemetryRegionOffRing       = 128
 )
@@ -94,8 +96,12 @@ type TelemetryReader struct {
 	ring    *Ring
 	waiting *uint32
 	dropped *uint64
+	drain   *uint64 // D16 pacing, host-written
+	idle    *uint64
 	bell    int
 	host    int // D15: a pidfd on the host, -1 where none could be opened
+	// active is when a Wait last found records (zero: never), for pacing.
+	active time.Time
 }
 
 // hostProcess opens a process handle on the peer of the attach socket (D15),
@@ -151,6 +157,8 @@ func openTelemetryReader(regionFd, bellFd int) (*TelemetryReader, error) {
 		mem: mem, ring: r, bell: bellFd, host: -1,
 		waiting: u32ptr(mem, telemetryRegionOffWaiting),
 		dropped: u64ptr(mem, telemetryRegionOffDropped),
+		drain:   u64ptr(mem, telemetryRegionOffDrainNS),
+		idle:    u64ptr(mem, telemetryRegionOffIdleNS),
 	}, nil
 }
 
@@ -187,21 +195,71 @@ func (t *TelemetryReader) Release(n uint64) {
 func (t *TelemetryReader) Dropped() uint64 { return atomic.LoadUint64(t.dropped) }
 
 // Wait sleeps until a record is available or timeout passes (negative waits
-// indefinitely), under the D13 protocol. It reports whether records are
-// available, and returns ErrEpoch once the host has exited (D15).
+// indefinitely). It reports whether records are available, and returns
+// ErrEpoch once the host has exited (D15).
+//
+// Paced by the host's published drain interval and idle threshold (D16): a
+// reader that found records within the idle threshold sleeps one drain
+// interval and looks again, with the waiting flag down so a busy host never
+// rings for it. Idle longer, it sleeps on the doorbell under the D13 protocol.
 func (t *TelemetryReader) Wait(timeout time.Duration) (bool, error) {
-	atomic.StoreUint32(t.waiting, 1)
-	defer atomic.StoreUint32(t.waiting, 0)
-	if t.Available() > 0 {
-		return true, nil
-	}
-	ms := -1
+	var deadline time.Time
 	if timeout >= 0 {
-		ms = int((timeout + time.Millisecond - 1) / time.Millisecond)
+		deadline = time.Now().Add(timeout)
 	}
 	fds := []unix.PollFd{{Fd: int32(t.bell), Events: unix.POLLIN}}
 	if t.host >= 0 {
 		fds = append(fds, unix.PollFd{Fd: int32(t.host), Events: unix.POLLIN})
+	}
+	interval := time.Duration(atomic.LoadUint64(t.drain))
+	idle := time.Duration(atomic.LoadUint64(t.idle))
+	for {
+		if t.Available() > 0 {
+			t.active = time.Now()
+			return true, nil
+		}
+		now := time.Now()
+		if !deadline.IsZero() && !now.Before(deadline) {
+			return false, nil
+		}
+		if interval <= 0 || t.active.IsZero() || now.Sub(t.active) >= idle {
+			break
+		}
+		step := interval
+		if !deadline.IsZero() && deadline.Sub(now) < step {
+			step = deadline.Sub(now)
+		}
+		ts := unix.NsecToTimespec(int64(step))
+		n, err := unix.Ppoll(fds, &ts, nil)
+		if err != nil && err != unix.EINTR {
+			return false, err
+		}
+		if n > 0 && len(fds) > 1 && fds[1].Revents != 0 {
+			if t.Available() > 0 {
+				return true, nil
+			}
+			return false, ErrEpoch
+		}
+		if n > 0 && fds[0].Revents&unix.POLLIN != 0 {
+			// Interrupt: return now, as an unpaced wait would.
+			var count [8]byte
+			_, _ = unix.Read(t.bell, count[:])
+			return t.Available() > 0, nil
+		}
+	}
+	atomic.StoreUint32(t.waiting, 1)
+	defer atomic.StoreUint32(t.waiting, 0)
+	if t.Available() > 0 {
+		t.active = time.Now()
+		return true, nil
+	}
+	ms := -1
+	if !deadline.IsZero() {
+		left := time.Until(deadline)
+		if left < 0 {
+			left = 0
+		}
+		ms = int((left + time.Millisecond - 1) / time.Millisecond)
 	}
 	n, err := unix.Poll(fds, ms)
 	if err != nil && err != unix.EINTR {
@@ -212,6 +270,7 @@ func (t *TelemetryReader) Wait(timeout time.Duration) (bool, error) {
 		_, _ = unix.Read(t.bell, count[:])
 	}
 	if t.Available() > 0 {
+		t.active = time.Now()
 		return true, nil
 	}
 	if n > 0 && len(fds) > 1 && fds[1].Revents != 0 {

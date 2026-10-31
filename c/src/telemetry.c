@@ -1,10 +1,12 @@
 /* telemetry.c: the D16 record encoding and the telemetry consumer end. */
+#define _GNU_SOURCE /* ppoll */
 #include <ouroboros/telemetry.h>
 
 #include <errno.h>
 #include <poll.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static void put32(uint8_t *p, uint32_t v)
@@ -147,22 +149,73 @@ uint64_t ouro_telemetry_dropped(const ouro_telemetry_reader_t *r)
    return r && r->hdr ? atomic_load_explicit(&r->hdr->dropped, memory_order_relaxed) : 0;
 }
 
+static uint64_t monotonic_ns(void)
+{
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
 int ouro_telemetry_wait(ouro_telemetry_reader_t *r, int extra_fd, int timeout_ms)
 {
    if (!r || !r->hdr)
       return -1;
-   /* D13: flag, fence, re-check, sleep. Either the host's fenced load sees the
-    * flag and rings, or this re-check sees its record. */
+   uint64_t start = monotonic_ns();
+   uint64_t deadline =
+       timeout_ms < 0 ? UINT64_MAX : start + (uint64_t)timeout_ms * 1000000ull;
+   uint64_t interval = atomic_load_explicit(&r->hdr->drain_interval_ns, memory_order_relaxed);
+   uint64_t idle = atomic_load_explicit(&r->hdr->idle_after_ns, memory_order_relaxed);
+   struct pollfd p[2] = {{.fd = r->doorbell_fd, .events = POLLIN},
+                         {.fd = extra_fd, .events = POLLIN}};
+   nfds_t n = extra_fd >= 0 ? 2 : 1;
+   /* Busy (D16 pacing): look again every drain interval while records keep
+    * arriving, with the waiting flag down so the host never rings for it. The
+    * doorbell is still polled, so an explicit wake ends the sleep early. */
+   for (;;)
+   {
+      if (ouro_telemetry_available(r) > 0)
+      {
+         r->active_ns = monotonic_ns();
+         return 1;
+      }
+      uint64_t now = monotonic_ns();
+      if (now >= deadline)
+         return 0;
+      if (!interval || !r->active_ns || now - r->active_ns >= idle)
+         break;
+      uint64_t step = deadline - now < interval ? deadline - now : interval;
+      struct timespec ts = {.tv_sec = (time_t)(step / 1000000000ull),
+                            .tv_nsec = (long)(step % 1000000000ull)};
+      int rc = ppoll(p, n, &ts, NULL);
+      if (rc < 0 && errno != EINTR)
+         return -1;
+      if (rc > 0 && ((n > 1 && p[1].revents) || (p[0].revents & POLLIN)))
+      {
+         /* extra_fd, or an explicit wake: return now, as an unpaced wait would. */
+         uint64_t count;
+         if (p[0].revents & POLLIN)
+            while (read(r->doorbell_fd, &count, sizeof count) < 0 && errno == EINTR)
+               ;
+         return ouro_telemetry_available(r) > 0 ? 1 : 0;
+      }
+   }
+   /* Idle: D13 flag, fence, re-check, sleep. Either the host's fenced load sees
+    * the flag and rings, or this re-check sees its record. */
    atomic_store_explicit(&r->hdr->consumer_waiting, 1, memory_order_seq_cst);
    atomic_thread_fence(memory_order_seq_cst);
    if (ouro_telemetry_available(r) > 0)
    {
       atomic_store_explicit(&r->hdr->consumer_waiting, 0, memory_order_relaxed);
+      r->active_ns = monotonic_ns();
       return 1;
    }
-   struct pollfd p[2] = {{.fd = r->doorbell_fd, .events = POLLIN},
-                         {.fd = extra_fd, .events = POLLIN}};
-   int rc = poll(p, extra_fd >= 0 ? 2 : 1, timeout_ms);
+   int wait_ms = -1;
+   if (deadline != UINT64_MAX)
+   {
+      uint64_t now = monotonic_ns();
+      wait_ms = now >= deadline ? 0 : (int)((deadline - now + 999999ull) / 1000000ull);
+   }
+   int rc = poll(p, n, wait_ms);
    if (rc > 0 && (p[0].revents & POLLIN))
    {
       uint64_t count;
@@ -172,5 +225,10 @@ int ouro_telemetry_wait(ouro_telemetry_reader_t *r, int extra_fd, int timeout_ms
    atomic_store_explicit(&r->hdr->consumer_waiting, 0, memory_order_relaxed);
    if (rc < 0 && errno != EINTR)
       return -1;
-   return ouro_telemetry_available(r) > 0 ? 1 : 0;
+   if (ouro_telemetry_available(r) > 0)
+   {
+      r->active_ns = monotonic_ns();
+      return 1;
+   }
+   return 0;
 }

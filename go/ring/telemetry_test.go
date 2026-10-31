@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -174,5 +175,117 @@ func TestTelemetryConformance(t *testing.T) {
 	}
 	if waited := time.Since(start); waited > 5*time.Second {
 		t.Errorf("woke %v after the host exited, not at once", waited)
+	}
+}
+
+// D16 pacing, with the test playing the host: a region in a memfd, the pacing
+// fields written as a host publishes them, and records produced by hand.
+func TestTelemetryPacing(t *testing.T) {
+	const capacity = 8
+	size := telemetryRegionOffRing + ringHdrBytes + TelemetryRecordLen*capacity
+	fd, err := unix.MemfdCreate("telemetry-pacing", unix.MFD_CLOEXEC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Ftruncate(fd, int64(size)); err != nil {
+		t.Fatal(err)
+	}
+	host, err := unix.Mmap(fd, 0, size, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Munmap(host)
+	ring, err := initRing(host[telemetryRegionOffRing:], TelemetryRecordLen, capacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary.LittleEndian.PutUint32(host[telemetryRegionOffVersion:], telemetryVersion)
+	binary.LittleEndian.PutUint32(host[telemetryRegionOffRecordSize:], TelemetryRecordLen)
+	setPacing := func(drain, idle time.Duration) {
+		atomic.StoreUint64(u64ptr(host, telemetryRegionOffDrainNS), uint64(drain))
+		atomic.StoreUint64(u64ptr(host, telemetryRegionOffIdleNS), uint64(idle))
+	}
+	setPacing(2*time.Millisecond, 200*time.Millisecond)
+	atomic.StoreUint32(u32ptr(host, telemetryRegionOffMagic), telemetryMagic)
+	bell, err := unix.Eventfd(0, unix.EFD_NONBLOCK|unix.EFD_CLOEXEC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := openTelemetryReader(fd, bell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	waiting := u32ptr(host, telemetryRegionOffWaiting)
+	produce := func() { atomic.StoreUint64(ring.head, atomic.LoadUint64(ring.head)+1) }
+	waitAsync := func(timeout time.Duration) chan bool {
+		done := make(chan bool, 1)
+		go func() {
+			ok, err := r.Wait(timeout)
+			if err != nil {
+				t.Errorf("wait: %v", err)
+			}
+			done <- ok
+		}()
+		return done
+	}
+
+	produce()
+	if ok, err := r.Wait(time.Second); !ok || err != nil {
+		t.Fatalf("first record: %v %v", ok, err)
+	}
+	r.Release(r.Available())
+
+	// Busy: found records just now, so the reader drains on the interval and
+	// never raises the waiting flag, and the host is never asked to ring.
+	done := waitAsync(time.Second)
+	for end := time.Now().Add(30 * time.Millisecond); time.Now().Before(end); {
+		if atomic.LoadUint32(waiting) != 0 {
+			t.Fatal("a busy reader raised the waiting flag")
+		}
+	}
+	produce()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("the paced reader missed the record")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("the paced reader did not see the record within its drain interval")
+	}
+	r.Release(r.Available())
+
+	// An explicit Interrupt ends a paced sleep at once.
+	done = waitAsync(5 * time.Second)
+	time.Sleep(10 * time.Millisecond)
+	start := time.Now()
+	r.Interrupt()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("no record was written")
+		}
+		if waited := time.Since(start); waited > 500*time.Millisecond {
+			t.Fatalf("Interrupt took %v", waited)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Interrupt did not end a paced wait")
+	}
+
+	// Idle: past the threshold the reader sleeps on the doorbell (D13) and the
+	// host must ring.
+	setPacing(time.Millisecond, time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+	done = waitAsync(5 * time.Second)
+	for end := time.Now().Add(time.Second); atomic.LoadUint32(waiting) == 0; {
+		if time.Now().After(end) {
+			t.Fatal("an idle reader did not sleep on the doorbell")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	produce()
+	ringDoorbell(bell)
+	if ok := <-done; !ok {
+		t.Fatal("the doorbell did not wake the idle reader")
 	}
 }

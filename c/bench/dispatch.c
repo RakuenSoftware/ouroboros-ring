@@ -10,11 +10,16 @@
  *   dispatch_overhead_p99_ns=<p99>
  *
  * With OURO_BENCH_TELEMETRY=1 the host also writes a D16 record per event, and
- * a consumer thread drains them as an exporter would, so the same number shows
- * what the hand-off adds.
+ * a consumer thread drains them through the reader's own paced wait, as an
+ * exporter would, so the same number shows what the hand-off adds. It also
+ * prints telemetry_wakes=<doorbell writes>, which a busy consumer keeps near 0.
+ *
+ * OURO_BENCH_HOST_CPU and OURO_BENCH_DRAIN_CPU pin the two threads. Results
+ * compare only on one machine with the same pinning.
  */
 #define _GNU_SOURCE
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -26,12 +31,29 @@
 #include <ouroboros/local_attach.h>
 #include <ouroboros/telemetry.h>
 
+/* Pin the calling thread to the CPU an environment variable names, if any. */
+static void pin_from_env(const char *name)
+{
+   const char *v = getenv(name);
+   if (!v || !*v)
+      return;
+   cpu_set_t set;
+   CPU_ZERO(&set);
+   CPU_SET(atoi(v), &set);
+   if (pthread_setaffinity_np(pthread_self(), sizeof set, &set) != 0)
+   {
+      fprintf(stderr, "bench: cannot pin to cpu %s\n", v);
+      abort();
+   }
+}
+
 static atomic_int telemetry_stop;
 static atomic_ullong telemetry_drained;
 
 static void *telemetry_drain(void *p)
 {
    ouro_telemetry_reader_t *r = p;
+   pin_from_env("OURO_BENCH_DRAIN_CPU");
    while (!atomic_load_explicit(&telemetry_stop, memory_order_relaxed))
    {
       uint64_t n = ouro_telemetry_available(r);
@@ -70,6 +92,7 @@ static int cmp_u64(const void *a, const void *b)
 int main(int argc, char **argv)
 {
    uint64_t total = (argc > 1) ? strtoull(argv[1], NULL, 10) : 2000000;
+   pin_from_env("OURO_BENCH_HOST_CPU");
 
    ouro_host_config_t cfg;
    memset(&cfg, 0, sizeof cfg);
@@ -160,6 +183,7 @@ int main(int argc, char **argv)
    {
       atomic_store(&telemetry_stop, 1);
       pthread_join(drainer, NULL);
+      printf("telemetry_wakes=%llu\n", (unsigned long long)h.telemetry_wakes);
       fprintf(stderr, "bench: telemetry on, %llu records drained, %llu lost\n",
               (unsigned long long)atomic_load(&telemetry_drained),
               (unsigned long long)ouro_telemetry_dropped(&reader));

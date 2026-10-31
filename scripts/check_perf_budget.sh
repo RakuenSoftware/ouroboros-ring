@@ -25,3 +25,12 @@ check() { # metric env...
 check dispatch_overhead_ns OURO_BENCH_TELEMETRY=0
 # D16: the same dispatch with the telemetry hand-off on.
 check dispatch_overhead_telemetry_ns OURO_BENCH_TELEMETRY=1
+# D16 pacing: a busy consumer must not be woken per pump.
+wake_ceiling=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["metrics"]["telemetry_wakes"]["ceiling"])' "$baseline")
+wakes=$(OURO_BENCH_TELEMETRY=1 "$bench" 500000 | sed -n 's/^telemetry_wakes=//p')
+[ -n "$wakes" ] || { echo "FAIL: the benchmark printed no telemetry_wakes" >&2; exit 1; }
+echo "telemetry_wakes: ${wakes} doorbell writes (ceiling ${wake_ceiling})"
+if [ "$wakes" -gt "$wake_ceiling" ]; then
+   echo "FAIL: ${wakes} doorbell writes for a busy consumer: pacing is not holding it awake." >&2
+   exit 1
+fi
