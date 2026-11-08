@@ -88,4 +88,4 @@ Unix socket paths are limited to 108 bytes; run the tests with a short `TMPDIR`.
 
 ## License
 
-AGPL-3.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).
