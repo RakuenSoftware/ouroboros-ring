@@ -5,6 +5,15 @@ and `go/v<VERSION>`, and the pull requests named here carry the full evidence.
 Within 0.x a minor release may break consumers
 ([versions and releases](docs/versions-and-releases.md)).
 
+## Unreleased
+
+Rust module runtime: a stage thread releases its handler before it reports,
+so once `run_module_client` returns nothing the handler captured is still
+alive. An in-process host that reopened a store right after shutdown could
+find it still held (seen as an intermittent `EAGAIN` on a store lock under
+load). The C runtime joins its handler threads and Go does not tie resource
+lifetime to the handler, so neither was affected.
+
 ## 0.4.0 (2026-10-31)
 
 The telemetry consumer is paced, so a busy host no longer wakes it once per
