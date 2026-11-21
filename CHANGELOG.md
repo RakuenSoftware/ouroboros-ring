@@ -5,14 +5,18 @@ and `go/v<VERSION>`, and the pull requests named here carry the full evidence.
 Within 0.x a minor release may break consumers
 ([versions and releases](docs/versions-and-releases.md)).
 
-## Unreleased
+## 0.4.1 (2026-11-21)
 
-Rust module runtime: a stage thread releases its handler before it reports,
-so once `run_module_client` returns nothing the handler captured is still
-alive. An in-process host that reopened a store right after shutdown could
-find it still held (seen as an intermittent `EAGAIN` on a store lock under
-load). The C runtime joins its handler threads and Go does not tie resource
-lifetime to the handler, so neither was affected.
+A Rust runtime fix (#18) and a new license (#17). The wire, layout and
+contract versions and the C ABI are unchanged.
+
+- **Fixed, Rust.** A stage thread releases its handler before it reports, so
+  once `run_module_client` returns, nothing the handler captured is still
+  alive. Before, an in-process host that reopened a store right after shutdown
+  could find it still held, seen as an intermittent `EAGAIN` on a store lock
+  under load. The C runtime joins its handler threads and Go does not tie
+  resource lifetime to the handler, so neither was affected.
+- **License.** The ring is now Apache-2.0; it was AGPL-3.0.
 
 ## 0.4.0 (2026-10-31)
 
