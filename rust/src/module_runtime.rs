@@ -558,7 +558,19 @@ fn serve<B: ModuleRing>(
             .spawn(move || {
                 let body = assembly.body;
                 let (out, status) = run_handler(&handler, &invocation, &body, &name, kind);
+                // Release the handler before answering. Shutdown drains every
+                // report but does not join stage threads, so a clone held past
+                // the send could keep the module's resources (an open store and
+                // its lock) alive after run_module_client returns, and an
+                // in-process reopen would find them still held.
+                drop(handler);
                 report.send(out, status);
+                // Test probe only: hold this thread after replying, so a stage
+                // thread still owning the handler here would outlive shutdown.
+                #[cfg(test)]
+                if name == "release-order-probe" {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
                 if let Some(w) = wake {
                     w.wake();
                 }
@@ -837,9 +849,13 @@ mod tests {
     }
 
     fn serve(bus: Arc<FakeRing>, handler: Option<Handler>, until: &[u64]) {
+        serve_named(bus, "test", handler, until)
+    }
+
+    fn serve_named(bus: Arc<FakeRing>, name: &str, handler: Option<Handler>, until: &[u64]) {
         let config = ModuleProcessConfig {
             socket_path: "/unused".into(),
-            module_name: "test".into(),
+            module_name: name.into(),
             principal_class: 1,
             principal_ref: 7,
             stages: vec![ModuleStage {
@@ -962,6 +978,29 @@ mod tests {
         let mut origins = seen.lock().unwrap().clone();
         origins.sort_unstable();
         assert_eq!(origins, vec![(0, 0), (1, 90)]);
+    }
+
+    #[test]
+    fn handler_resources_are_released_when_shutdown_returns() {
+        // Each stage thread owns a clone of the handler. Once shutdown has
+        // drained the replies and the worker has been joined, whatever the
+        // handler captured must already be released: an in-process host that
+        // reopens a store right after shutdown would otherwise find it held.
+        // The "release-order-probe" module name holds each stage thread for a
+        // moment after it replies (cfg(test) only).
+        let bus = Arc::new(FakeRing::default());
+        push_invoke(&bus, KIND, STAGE, 1, 0, b"x");
+        let resource = Arc::new(());
+        let watch = Arc::downgrade(&resource);
+        let handler: Handler = Arc::new(move |_, req| {
+            let _held = &resource;
+            (req.to_vec(), ModuleStatus::Ok)
+        });
+        serve_named(Arc::clone(&bus), "release-order-probe", Some(handler), &[1]);
+        assert!(
+            watch.upgrade().is_none(),
+            "a stage thread still held the handler after shutdown returned"
+        );
     }
 
     fn echo() -> Handler {
